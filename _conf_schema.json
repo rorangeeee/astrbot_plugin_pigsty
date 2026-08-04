@@ -1,0 +1,12 @@
+{
+  "pigsty_scope": {
+    "type": "string",
+    "description": "猪圈数据作用域",
+    "hint": "global 在同一平台的所有群聊和私聊共享；group 按群隔离，私聊使用该平台主人的私聊空间。",
+    "default": "global",
+    "options": [
+      "global",
+      "group"
+    ]
+  }
+}

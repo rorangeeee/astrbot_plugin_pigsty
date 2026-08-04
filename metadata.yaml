@@ -1,0 +1,6 @@
+name: astrbot_plugin_pigsty
+desc: "严格类型化的群友小猪圈基础插件"
+version: "0.1.0"
+author: "wkc20"
+repo: "https://github.com/wkc20/astrbot_plugin_pigsty"
+astrbot_version: ">=4.16,<5"

@@ -1,0 +1,94 @@
+[project]
+name = "astrbot-plugin-pigsty"
+version = "0.1.0"
+description = "Strictly typed Pigsty foundation for AstrBot"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "anyio>=4.9,<5",
+    "pydantic>=2.11,<3",
+    "typing-extensions>=4.12,<5",
+]
+
+[dependency-groups]
+dev = [
+    "basedpyright>=1.31",
+    "pytest>=8.4",
+    "ruff>=0.12",
+]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = ["-ra", "--strict-config", "--strict-markers"]
+filterwarnings = ["error"]
+
+[tool.basedpyright]
+typeCheckingMode = "all"
+pythonVersion = "3.11"
+pythonPlatform = "All"
+stubPath = "typings"
+extraPaths = ["tests/fake_runtime"]
+include = ["core", "tests", "main.py"]
+exclude = ["**/__pycache__", "**/.pytest_cache", "**/.venv", "**/build", "**/dist"]
+reportUnusedCallResult = "warning"
+reportUnnecessaryTypeIgnoreComment = "error"
+reportUnusedVariable = "error"
+reportMissingParameterType = "error"
+reportPrivateUsage = "error"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
+src = ["core", "tests"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812",
+    "ISC001",
+    "D203",
+    "D213",
+    "CPY001",
+    "FBT001",
+    "FBT002",
+    "TD002",
+    "TD003",
+    "FIX002",
+]
+fixable = ["ALL"]
+unfixable = []
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*.py" = [
+    "S101",
+    "ARG",
+    "PLR2004",
+    "SLF001",
+    "D",
+]
+"main.py" = [
+    "A004",   # AstrBot exposes its decorator namespace as `filter`.
+    "RUF001", # Chinese messages intentionally use fullwidth punctuation.
+]
+"tests/fake_runtime/astrbot/api/event.py" = [
+    "A001", # The fake runtime mirrors AstrBot's `filter` binding.
+    "N801", # The fake runtime mirrors AstrBot's lowercase API name.
+]
+"tests/test_plugin.py" = [
+    "S603", # Fixed local interpreter command with no shell or external input.
+]
+"typings/astrbot/api/event.pyi" = [
+    "A001", # The stub must expose AstrBot's `filter` binding.
+    "N801", # The stub must preserve AstrBot's lowercase API name.
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+docstring-code-format = true
+docstring-code-line-length = "dynamic"
