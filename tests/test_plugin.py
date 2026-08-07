@@ -49,22 +49,152 @@ import anyio
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
+from astrbot.api.message_components import At
 from astrbot.api.star import Context, Star
-from astrbot_plugin_pigsty.core.identity import PigstyScope
+from astrbot_plugin_pigsty.core.identity import (
+    PigstyScope,
+    resolve_session_identity,
+)
 from astrbot_plugin_pigsty.main import PigstyPlugin
 
 plugin = PigstyPlugin(Context(), AstrBotConfig(pigsty_scope="group"))
 assert issubclass(PigstyPlugin, Star)
 assert plugin.scope is PigstyScope.GROUP
 assert plugin.repository.data_dir == Path(os.environ["ASTRBOT_TEST_DATA_DIR"])
+owner_event = AstrMessageEvent(
+    sender_id="owner-a",
+    platform_id="qq",
+    group_id="group-1",
+)
+target_event = AstrMessageEvent(
+    sender_id="owner-a",
+    platform_id="qq",
+    group_id="group-1",
+    messages=(At(qq="target-1"),),
+)
+empty_owner_event = AstrMessageEvent(
+    sender_id="owner-b",
+    platform_id="qq",
+    group_id="group-1",
+)
+target_owner_event = AstrMessageEvent(
+    sender_id="target-1",
+    platform_id="qq",
+    group_id="group-1",
+)
+numeric_target_event = AstrMessageEvent(
+    sender_id="owner-int",
+    platform_id="qq",
+    group_id="group-1",
+    messages=(At(qq=123456),),
+)
+private_event = AstrMessageEvent(
+    sender_id="private-owner",
+    platform_id="qq",
+    group_id="",
+)
+
+async def collect(
+    event: AstrMessageEvent, action: str
+) -> tuple[MessageEventResult, ...]:
+    return tuple([result async for result in plugin.pig_command(event, action)])
 
 async def assert_status_result() -> None:
-    results = [result async for result in plugin.pig_command(AstrMessageEvent())]
+    results = await collect(owner_event, "status")
     assert len(results) == 1
     assert isinstance(results[0], MessageEventResult)
     assert results[0].text == "Pigsty 数据层已就绪\\n作用域\\uff1agroup"
 
+async def assert_macro_commands() -> None:
+    unknown_results = await collect(owner_event, "wat")
+    assert unknown_results[0].text == (
+        "用法\uff1apig status | pig add [@用户] | pig show"
+    )
+
+    empty_results = await collect(empty_owner_event, "show")
+    assert empty_results[0].text == (
+        "你的猪圈还是空的\uff0c使用 pig add 添加一只小猪吧。"
+    )
+
+    private_results = await collect(private_event, "show")
+    assert private_results[0].text == (
+        "你的猪圈还是空的\uff0c使用 pig add 添加一只小猪吧。"
+    )
+
+    random_results = await collect(owner_event, "add")
+    assert random_results[0].text.startswith(
+        "已添加独立小猪\uff1a小猪-"
+    )
+    independent_name = random_results[0].text.removeprefix(
+        "已添加独立小猪\uff1a"
+    )
+
+    linked_results = await collect(target_event, "add")
+    assert linked_results[0].text.startswith(
+        "已将用户 target-1 添加为小猪\uff1a小猪-"
+    )
+    linked_name = linked_results[0].text.removeprefix(
+        "已将用户 target-1 添加为小猪\uff1a"
+    )
+
+    numeric_results = await collect(numeric_target_event, "add")
+    assert numeric_results[0].text.startswith(
+        "已将用户 123456 添加为小猪\uff1a小猪-"
+    )
+
+    duplicate_results = await collect(target_event, "add")
+    assert duplicate_results[0].text == "该用户已经在你的猪圈中。"
+
+    for messages in (
+        (At(qq="target-2"), At(qq="target-3")),
+        (At(qq=" "),),
+        (At(qq="all"),),
+    ):
+        invalid_event = AstrMessageEvent(
+            sender_id="owner-a",
+            platform_id="qq",
+            group_id="group-1",
+            messages=messages,
+        )
+        invalid_results = await collect(invalid_event, "add")
+        assert invalid_results[0].text == "用法\uff1apig add [@用户]"
+
+    shown_results = await collect(owner_event, "show")
+    shown_lines = shown_results[0].text.splitlines()
+    assert shown_lines[0] == "你的猪圈共有 2 只小猪\uff1a"
+    assert shown_lines[1].startswith(f"1. {independent_name}")
+    assert shown_lines[2].startswith(f"2. {linked_name}")
+    assert "独立小猪" in shown_lines[1]
+    assert "关联用户 target-1" in shown_lines[2]
+    for line in shown_lines[1:]:
+        assert all(label in line for label in ("体重", "健康", "心情", "体力"))
+
+    identity = resolve_session_identity(
+        PigstyScope.GROUP,
+        "qq",
+        "owner-a",
+        "group-1",
+    )
+    document = await plugin.repository.load(identity)
+    pig_ids = tuple(str(pig.pig_id) for pig in document.pigs)
+    user_outputs = (
+        random_results[0].text,
+        linked_results[0].text,
+        shown_results[0].text,
+    )
+    for pig_id in pig_ids:
+        assert all(pig_id not in output for output in user_outputs)
+
+    target_owner_results = await collect(target_owner_event, "show")
+    assert target_owner_results[0].text == (
+        "你的猪圈还是空的\uff0c使用 pig add 添加一只小猪吧。"
+    )
+
+    after_invalid_results = await collect(owner_event, "show")
+    assert "你的猪圈共有 2 只小猪\uff1a" in after_invalid_results[0].text
+
 anyio.run(assert_status_result)
+anyio.run(assert_macro_commands)
 """
 
     # When the plugin module is imported and initialized in a child process

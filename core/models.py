@@ -38,8 +38,8 @@ class Pig(BaseModel):
     )
 
     pig_id: UUID = Field(default_factory=uuid4)
-    member_platform_id: str = Field(min_length=1)
-    member_user_id: str = Field(min_length=1)
+    member_platform_id: str | None = Field(default=None, min_length=1)
+    member_user_id: str | None = Field(default=None, min_length=1)
     name: str = Field(min_length=1, max_length=32)
     age_days: int = Field(default=0, ge=0)
     weight_kg: float = Field(default=5.0, gt=0)
@@ -51,10 +51,27 @@ class Pig(BaseModel):
     updated_at: datetime = Field(default_factory=utc_now)
     last_state_update_at: datetime = Field(default_factory=utc_now)
 
-    @field_validator("member_platform_id", "member_user_id", "name")
+    @field_validator("member_platform_id", "member_user_id")
     @classmethod
-    def reject_blank_strings(cls, value: str, info: ValidationInfo) -> str:
-        """Reject identifiers and names that contain no non-space characters."""
+    def reject_blank_member_ids(
+        cls,
+        value: str | None,
+        info: ValidationInfo,
+    ) -> str | None:
+        """Reject member identifiers that contain no non-space characters."""
+        if value is not None and not value.strip():
+            error_type = "blank_string"
+            raise PydanticCustomError(
+                error_type,
+                "{field_name} must contain a non-space character",
+                {"field_name": info.field_name},
+            )
+        return value
+
+    @field_validator("name")
+    @classmethod
+    def reject_blank_name(cls, value: str, info: ValidationInfo) -> str:
+        """Reject names that contain no non-space characters."""
         if not value.strip():
             error_type = "blank_string"
             raise PydanticCustomError(
@@ -63,6 +80,17 @@ class Pig(BaseModel):
                 {"field_name": info.field_name},
             )
         return value
+
+    @model_validator(mode="after")
+    def validate_member_association(self) -> Self:
+        """Require member identifiers to be present together or both absent."""
+        if (self.member_platform_id is None) != (self.member_user_id is None):
+            error_type = "partial_member_association"
+            raise PydanticCustomError(
+                error_type,
+                "member identifiers must be provided together",
+            )
+        return self
 
     @field_validator(
         "born_at",

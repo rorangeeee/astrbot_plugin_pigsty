@@ -25,6 +25,53 @@ def test_pig_uses_phase_one_defaults_and_generates_uuid() -> None:
     assert pig.last_state_update_at.tzinfo is UTC
 
 
+def test_pig_allows_missing_member_association() -> None:
+    # Given a Pig without a member association
+    # When it is created with only its name
+    pig = Pig(name="Lucky")
+
+    # Then both member identifiers remain absent
+    assert pig.member_platform_id is None
+    assert pig.member_user_id is None
+
+
+@pytest.mark.parametrize(
+    ("member_platform_id", "member_user_id"),
+    [("qq", None), (None, "7")],
+)
+def test_pig_rejects_partial_member_association(
+    member_platform_id: str | None,
+    member_user_id: str | None,
+) -> None:
+    # Given exactly one member identifier
+    # When the boundary model parses it
+    with pytest.raises(ValidationError):
+        _ = Pig(
+            member_platform_id=member_platform_id,
+            member_user_id=member_user_id,
+            name="Lucky",
+        )
+
+    # Then the incomplete association is rejected
+
+
+@pytest.mark.parametrize("field", ["member_platform_id", "member_user_id"])
+def test_pig_rejects_blank_member_identifier(field: str) -> None:
+    # Given a member identifier containing only whitespace
+    values: dict[str, str | None] = {
+        "member_platform_id": "qq",
+        "member_user_id": "7",
+        "name": "Lucky",
+        field: "   ",
+    }
+
+    # When the boundary model parses it
+    with pytest.raises(ValidationError):
+        _ = Pig.model_validate(values)
+
+    # Then the blank identifier is rejected
+
+
 def test_pig_rejects_blank_name() -> None:
     # Given a name containing only whitespace
     # When the boundary model parses it
