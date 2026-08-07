@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import (
+    AsyncIterator,  # noqa: TC003 - AstrBot evaluates command annotations at runtime.
+)
 from typing import TYPE_CHECKING, Final
 
-from astrbot.api.event import filter
+from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import At
 from astrbot.api.star import Star, StarTools, register
 from typing_extensions import override
@@ -19,11 +22,9 @@ from .core.repository import JsonPigstyRepository
 from .core.service import DuplicateMemberPigError, PigstyService
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from astrbot.api import AstrBotConfig
-    from astrbot.api.event import AstrMessageEvent, MessageEventResult
     from astrbot.api.star import Context
 
     from .core.models import Pig
@@ -37,10 +38,10 @@ class InvalidMemberTargetError(Exception):
 
 @register(
     PLUGIN_NAME,
-    "wkc20",
-    "严格类型化的群友小猪圈基础插件",
-    "0.1.0",
-    "https://github.com/wkc20/astrbot_plugin_pigsty",
+    "when",
+    "群友小猪圈基础插件",
+    "v0.1.0",
+    "https://github.com/rorangeeee/astrbot_plugin_pigsty",
 )
 class PigstyPlugin(Star):
     """AstrBot lifecycle adapter for Pigsty's core services."""

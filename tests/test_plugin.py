@@ -44,6 +44,7 @@ def test_plugin_import_and_initialization_use_astrbot_boundary(tmp_path: Path) -
     script = """
 from pathlib import Path
 import os
+import inspect
 
 import anyio
 
@@ -57,6 +58,7 @@ from astrbot_plugin_pigsty.core.identity import (
 )
 from astrbot_plugin_pigsty.main import PigstyPlugin
 
+inspect.signature(PigstyPlugin.pig_command, eval_str=True)
 plugin = PigstyPlugin(Context(), AstrBotConfig(pigsty_scope="group"))
 assert issubclass(PigstyPlugin, Star)
 assert plugin.scope is PigstyScope.GROUP
@@ -247,9 +249,9 @@ def test_metadata_declares_required_plugin_contract() -> None:
     # Then required fields and the approved compatibility range are present
     assert {
         "name: astrbot_plugin_pigsty",
-        'desc: "严格类型化的群友小猪圈基础插件"',
-        'version: "0.1.0"',
-        'author: "wkc20"',
-        'repo: "https://github.com/wkc20/astrbot_plugin_pigsty"',
-        'astrbot_version: ">=4.16,<5"',
+        'desc: "群友小猪圈基础插件"',
+        "version: v0.1.0",
+        "author: when",
+        "repo: https://github.com/rorangeeee/astrbot_plugin_pigsty",
+        'astrbot_version: ">=4.16"',
     } <= declarations
