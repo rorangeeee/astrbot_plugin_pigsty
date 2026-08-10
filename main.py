@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import (
     AsyncIterator,  # noqa: TC003 - AstrBot evaluates command annotations at runtime.
 )
@@ -10,6 +11,7 @@ from typing import TYPE_CHECKING, Final
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import At
 from astrbot.api.star import Star, StarTools, register
+from pydantic import ValidationError
 from typing_extensions import override
 
 from .core.identity import (
@@ -19,7 +21,11 @@ from .core.identity import (
     resolve_session_identity,
 )
 from .core.repository import JsonPigstyRepository
-from .core.service import DuplicateMemberPigError, PigstyService
+from .core.service import (
+    DuplicateMemberPigError,
+    PigPositionNotFoundError,
+    PigstyService,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -30,6 +36,11 @@ if TYPE_CHECKING:
     from .core.models import Pig
 
 PLUGIN_NAME: Final = "astrbot_plugin_pigsty"
+ADD_USAGE: Final = "pig add [@用户] [名字]"
+RENAME_USAGE: Final = "pig rename <序号> <新名字>"
+UNKNOWN_COMMAND_USAGE: Final = (
+    f"用法：pig status | {ADD_USAGE} | {RENAME_USAGE} | pig show"
+)
 
 
 class InvalidMemberTargetError(Exception):
@@ -106,6 +117,13 @@ class PigstyPlugin(Star):
         return target
 
     @staticmethod
+    def _command_tail(event: AstrMessageEvent, action: str) -> str:
+        """Return trimmed raw text after one command action token."""
+        pattern = re.compile(rf"(?:^|\s){re.escape(action)}(?:\s+|$)", re.IGNORECASE)
+        match = pattern.search(event.message_str)
+        return "" if match is None else event.message_str[match.end() :].strip()
+
+    @staticmethod
     def _render_pigsty(pigs: tuple[Pig, ...]) -> str:
         """Render persisted pigs without exposing their UUIDs."""
         if not pigs:
@@ -127,7 +145,7 @@ class PigstyPlugin(Star):
         return "\n".join(lines)
 
     @filter.command("pig")
-    async def pig_command(
+    async def pig_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
         event: AstrMessageEvent,
         action: str = "status",
@@ -141,30 +159,68 @@ class PigstyPlugin(Star):
             try:
                 target = self._member_target_for_event(event)
             except InvalidMemberTargetError:
-                yield event.plain_result("用法：pig add [@用户]")
+                yield event.plain_result("用法：pig add [@用户] [名字]")
                 return
 
             identity = self._identity_for_event(event)
+            name = self._command_tail(event, normalized_action) or None
             if target is None:
-                pig = await self.service.add_random(identity)
+                try:
+                    pig = await self.service.add_random(identity, name)
+                except ValidationError:
+                    yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
+                    return
                 yield event.plain_result(f"已添加独立小猪：{pig.name}")
                 return
 
             try:
                 pig = await self.service.add_member(
-                    identity, identity.platform_id, target
+                    identity, identity.platform_id, target, name
                 )
             except DuplicateMemberPigError:
                 yield event.plain_result("该用户已经在你的猪圈中。")
                 return
+            except ValidationError:
+                yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
+                return
             yield event.plain_result(f"已将用户 {target} 添加为小猪：{pig.name}")
+            return
+        if normalized_action == "rename":
+            tail = self._command_tail(event, normalized_action)
+            parts = tail.split(maxsplit=1)
+            if not parts:
+                yield event.plain_result("用法：pig rename <序号> <新名字>")
+                return
+            name = tail.removeprefix(parts[0]).strip()
+            if not name:
+                yield event.plain_result("用法：pig rename <序号> <新名字>")
+                return
+            try:
+                position = int(parts[0])
+            except ValueError:
+                yield event.plain_result("用法：pig rename <序号> <新名字>")
+                return
+            if position < 1:
+                yield event.plain_result("用法：pig rename <序号> <新名字>")
+                return
+            try:
+                pig = await self.service.rename_pig(
+                    self._identity_for_event(event), position, name
+                )
+            except PigPositionNotFoundError:
+                yield event.plain_result("用法：pig rename <序号> <新名字>")
+                return
+            except ValidationError:
+                yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
+                return
+            yield event.plain_result(f"已将第 {position} 只小猪改名为：{pig.name}")
             return
         if normalized_action == "show":
             identity = self._identity_for_event(event)
             pigs = await self.service.list_pigs(identity)
             yield event.plain_result(self._render_pigsty(pigs))
             return
-        yield event.plain_result("用法：pig status | pig add [@用户] | pig show")
+        yield event.plain_result(UNKNOWN_COMMAND_USAGE)
 
     @override
     async def terminate(self) -> None:

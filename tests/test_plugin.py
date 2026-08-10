@@ -90,6 +90,31 @@ numeric_target_event = AstrMessageEvent(
     group_id="group-1",
     messages=(At(qq=123456),),
 )
+named_owner_event = AstrMessageEvent(
+    sender_id="owner-a",
+    platform_id="qq",
+    group_id="group-1",
+    message_str="pig add 白雪 小猪",
+)
+named_target_event = AstrMessageEvent(
+    sender_id="owner-a",
+    platform_id="qq",
+    group_id="group-1",
+    messages=(At(qq="target-2"),),
+    message_str="pig add 花花 猪",
+)
+rename_event = AstrMessageEvent(
+    sender_id="owner-a",
+    platform_id="qq",
+    group_id="group-1",
+    message_str="pig rename 1 粉红 小猪",
+)
+invalid_rename_event = AstrMessageEvent(
+    sender_id="owner-a",
+    platform_id="qq",
+    group_id="group-1",
+    message_str="pig rename 0 无效",
+)
 private_event = AstrMessageEvent(
     sender_id="private-owner",
     platform_id="qq",
@@ -110,7 +135,8 @@ async def assert_status_result() -> None:
 async def assert_macro_commands() -> None:
     unknown_results = await collect(owner_event, "wat")
     assert unknown_results[0].text == (
-        "用法\uff1apig status | pig add [@用户] | pig show"
+        "用法\uff1apig status | pig add [@用户] [名字] | "
+        "pig rename <序号> <新名字> | pig show"
     )
 
     empty_results = await collect(empty_owner_event, "show")
@@ -159,7 +185,7 @@ async def assert_macro_commands() -> None:
             messages=messages,
         )
         invalid_results = await collect(invalid_event, "add")
-        assert invalid_results[0].text == "用法\uff1apig add [@用户]"
+        assert invalid_results[0].text == "用法\uff1apig add [@用户] [名字]"
 
     shown_results = await collect(owner_event, "show")
     shown_lines = shown_results[0].text.splitlines()
@@ -194,6 +220,25 @@ async def assert_macro_commands() -> None:
 
     after_invalid_results = await collect(owner_event, "show")
     assert "你的猪圈共有 2 只小猪\uff1a" in after_invalid_results[0].text
+
+    named_results = await collect(named_owner_event, "add")
+    assert named_results[0].text == "已添加独立小猪\uff1a白雪 小猪"
+
+    named_target_results = await collect(named_target_event, "add")
+    assert named_target_results[0].text == (
+        "已将用户 target-2 添加为小猪\uff1a花花 猪"
+    )
+
+    rename_results = await collect(rename_event, "rename")
+    assert rename_results[0].text == "已将第 1 只小猪改名为\uff1a粉红 小猪"
+
+    shown_after_rename = await collect(owner_event, "show")
+    assert "1. 粉红 小猪" in shown_after_rename[0].text
+    assert "白雪 小猪" in shown_after_rename[0].text
+    assert "花花 猪" in shown_after_rename[0].text
+
+    invalid_rename_results = await collect(invalid_rename_event, "rename")
+    assert invalid_rename_results[0].text == "用法\uff1apig rename <序号> <新名字>"
 
 anyio.run(assert_status_result)
 anyio.run(assert_macro_commands)

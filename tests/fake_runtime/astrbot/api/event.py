@@ -24,11 +24,13 @@ class AstrMessageEvent:
         platform_id: str = "qq",
         group_id: str | None = None,
         messages: tuple[object, ...] = (),
+        message_str: str = "",
     ) -> None:
         self._sender_id: str = sender_id
         self._platform_id: str = platform_id
         self._group_id: str | None = group_id
         self._messages: tuple[object, ...] = messages
+        self.message_str: str = message_str
 
     def get_sender_id(self) -> str:
         """Return the event sender identifier."""

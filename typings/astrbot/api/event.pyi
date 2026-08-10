@@ -8,12 +8,15 @@ _MessageComponent = object
 class MessageEventResult: ...
 
 class AstrMessageEvent:
+    message_str: str
+
     def __init__(
         self,
         sender_id: str = "42",
         platform_id: str = "qq",
         group_id: str | None = None,
         messages: tuple[_MessageComponent, ...] = (),
+        message_str: str = "",
     ) -> None: ...
     def get_sender_id(self) -> str: ...
     def get_platform_id(self) -> str: ...
