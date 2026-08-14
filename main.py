@@ -34,6 +34,7 @@ if TYPE_CHECKING:
     from astrbot.api.star import Context
 
     from .core.models import Pig
+    from .core.randomizer import InitialStatsRoll
 
 PLUGIN_NAME: Final = "astrbot_plugin_pigsty"
 ADD_USAGE: Final = "pig add [@用户] [名字]"
@@ -41,6 +42,12 @@ RENAME_USAGE: Final = "pig rename <序号> <新名字>"
 UNKNOWN_COMMAND_USAGE: Final = (
     f"用法：pig status | {ADD_USAGE} | {RENAME_USAGE} | pig show"
 )
+STAT_LABELS: Final = {
+    "weight_kg": "体重",
+    "health": "健康",
+    "mood": "心情",
+    "energy": "体力",
+}
 
 
 class InvalidMemberTargetError(Exception):
@@ -144,6 +151,21 @@ class PigstyPlugin(Star):
             lines.append(line)
         return "\n".join(lines)
 
+    @staticmethod
+    def _render_stat_anomalies(roll: InitialStatsRoll) -> str:
+        """Render the anomaly marker for stats outside the normal tier."""
+        anomalies = roll.anomalies
+        if not anomalies:
+            return ""
+        parts: list[str] = []
+        for stat in anomalies:
+            label = STAT_LABELS[stat.key]
+            if stat.key == "weight_kg":
+                parts.append(f"{label} {stat.value:.1f}kg")
+            else:
+                parts.append(f"{label} {stat.value}")
+        return f"（体质异变：{'，'.join(parts)}）"
+
     @filter.command("pig")
     async def pig_command(  # noqa: C901, PLR0911, PLR0912, PLR0915
         self,
@@ -166,15 +188,17 @@ class PigstyPlugin(Star):
             name = self._command_tail(event, normalized_action) or None
             if target is None:
                 try:
-                    pig = await self.service.add_random(identity, name)
+                    creation = await self.service.add_random(identity, name)
                 except ValidationError:
                     yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                     return
-                yield event.plain_result(f"已添加独立小猪：{pig.name}")
+                pig = creation.pig
+                anomalies = self._render_stat_anomalies(creation.roll)
+                yield event.plain_result(f"已添加独立小猪：{pig.name}{anomalies}")
                 return
 
             try:
-                pig = await self.service.add_member(
+                creation = await self.service.add_member(
                     identity, identity.platform_id, target, name
                 )
             except DuplicateMemberPigError:
@@ -183,7 +207,11 @@ class PigstyPlugin(Star):
             except ValidationError:
                 yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                 return
-            yield event.plain_result(f"已将用户 {target} 添加为小猪：{pig.name}")
+            pig = creation.pig
+            anomalies = self._render_stat_anomalies(creation.roll)
+            yield event.plain_result(
+                f"已将用户 {target} 添加为小猪：{pig.name}{anomalies}"
+            )
             return
         if normalized_action == "rename":
             tail = self._command_tail(event, normalized_action)

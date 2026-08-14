@@ -153,17 +153,19 @@ async def assert_macro_commands() -> None:
     assert random_results[0].text.startswith(
         "已添加独立小猪\uff1a小猪-"
     )
-    independent_name = random_results[0].text.removeprefix(
+    independent_text = random_results[0].text.removeprefix(
         "已添加独立小猪\uff1a"
     )
+    independent_name = independent_text.split("\uff08体质异变\uff1a", 1)[0]
 
     linked_results = await collect(target_event, "add")
     assert linked_results[0].text.startswith(
         "已将用户 target-1 添加为小猪\uff1a小猪-"
     )
-    linked_name = linked_results[0].text.removeprefix(
+    linked_text = linked_results[0].text.removeprefix(
         "已将用户 target-1 添加为小猪\uff1a"
     )
+    linked_name = linked_text.split("\uff08体质异变\uff1a", 1)[0]
 
     numeric_results = await collect(numeric_target_event, "add")
     assert numeric_results[0].text.startswith(
@@ -240,8 +242,59 @@ async def assert_macro_commands() -> None:
     invalid_rename_results = await collect(invalid_rename_event, "rename")
     assert invalid_rename_results[0].text == "用法\uff1apig rename <序号> <新名字>"
 
+
+async def assert_random_stat_markers() -> None:
+    from astrbot_plugin_pigsty.core.randomizer import (
+        InitialStatsRoll,
+        RolledStat,
+        RollTier,
+    )
+
+    import astrbot_plugin_pigsty.core.service as service_module
+
+    anomalous = InitialStatsRoll(
+        stats=(
+            RolledStat("weight_kg", 5.0, RollTier.NORMAL),
+            RolledStat("health", 100, RollTier.NORMAL),
+            RolledStat("mood", 45, RollTier.MAJOR),
+            RolledStat("energy", 80, RollTier.NORMAL),
+        )
+    )
+    normal = InitialStatsRoll(
+        stats=(
+            RolledStat("weight_kg", 5.0, RollTier.NORMAL),
+            RolledStat("health", 100, RollTier.NORMAL),
+            RolledStat("mood", 70, RollTier.NORMAL),
+            RolledStat("energy", 80, RollTier.NORMAL),
+        )
+    )
+
+    service_module.roll_initial_stats = lambda rng=None: anomalous
+    anomalous_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="pig add 异常 小猪",
+    )
+    anomalous_results = await collect(anomalous_event, "add")
+    assert anomalous_results[0].text == (
+        "已添加独立小猪\uff1a异常 小猪\uff08体质异变\uff1a心情 45\uff09"
+    )
+
+    service_module.roll_initial_stats = lambda rng=None: normal
+    normal_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="pig add 常态 小猪",
+    )
+    normal_results = await collect(normal_event, "add")
+    assert normal_results[0].text == "已添加独立小猪\uff1a常态 小猪"
+
+
 anyio.run(assert_status_result)
 anyio.run(assert_macro_commands)
+anyio.run(assert_random_stat_markers)
 """
 
     # When the plugin module is imported and initialized in a child process

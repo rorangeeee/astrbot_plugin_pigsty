@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import random
 from typing import TYPE_CHECKING, TypeVar
 
 import anyio
 import pytest
 from core.identity import PigstyScope, resolve_session_identity
+from core.randomizer import roll_initial_stats
 from core.repository import JsonPigstyRepository
 from core.service import (
     DuplicateMemberPigError,
     PigPositionNotFoundError,
     PigstyService,
 )
+from tests.conftest import ScriptedRng
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -31,7 +34,8 @@ def test_add_random_creates_an_independent_named_pig(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         # When an independent pig is added
-        pig = await service.add_random(identity)
+        creation = await service.add_random(identity)
+        pig = creation.pig
 
         # Then it has no member association and a UUID-derived name
         assert pig.member_platform_id is None
@@ -49,7 +53,8 @@ def test_add_member_creates_a_member_linked_pig(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         # When a member-linked pig is added
-        pig = await service.add_member(identity, "qq", "target")
+        creation = await service.add_member(identity, "qq", "target")
+        pig = creation.pig
 
         # Then the member pair and generated name are persisted
         assert pig.member_platform_id == "qq"
@@ -66,7 +71,7 @@ def test_add_member_rejects_duplicate_member_pair(tmp_path: Path) -> None:
     service = PigstyService(JsonPigstyRepository(tmp_path))
 
     async def scenario() -> None:
-        first = await service.add_member(identity, "qq", "target")
+        first = (await service.add_member(identity, "qq", "target")).pig
 
         # When the same member pair is added again
         with pytest.raises(DuplicateMemberPigError) as captured:
@@ -86,8 +91,8 @@ def test_list_pigs_preserves_creation_order(tmp_path: Path) -> None:
     service = PigstyService(JsonPigstyRepository(tmp_path))
 
     async def scenario() -> None:
-        first = await service.add_random(identity)
-        second = await service.add_member(identity, "qq", "target")
+        first = (await service.add_random(identity)).pig
+        second = (await service.add_member(identity, "qq", "target")).pig
 
         # When the owner's pigs are listed
         pigs = await service.list_pigs(identity)
@@ -109,7 +114,7 @@ def test_service_isolates_pigs_by_owner_identity(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         # When one owner adds a pig
-        first = await service.add_random(first_identity)
+        first = (await service.add_random(first_identity)).pig
 
         # Then the other owner remains independent
         assert await service.list_pigs(second_identity) == ()
@@ -125,7 +130,7 @@ def test_add_random_persists_a_custom_name(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         # When an independent pig is added with a multi-word name
-        pig = await service.add_random(identity, "白雪 小猪")
+        pig = (await service.add_random(identity, "白雪 小猪")).pig
 
         # Then the exact name is persisted
         assert pig.name == "白雪 小猪"
@@ -141,7 +146,7 @@ def test_add_member_persists_a_custom_name(tmp_path: Path) -> None:
 
     async def scenario() -> None:
         # When a member-linked pig is added with a multi-word name
-        pig = await service.add_member(identity, "qq", "target", "花花 猪")
+        pig = (await service.add_member(identity, "qq", "target", "花花 猪")).pig
 
         # Then its name and member association are persisted
         assert pig.name == "花花 猪"
@@ -157,8 +162,8 @@ def test_rename_pig_updates_only_the_selected_pig(tmp_path: Path) -> None:
     service = PigstyService(JsonPigstyRepository(tmp_path))
 
     async def scenario() -> None:
-        first = await service.add_random(identity, "原名")
-        second = await service.add_member(identity, "qq", "target", "关联猪")
+        first = (await service.add_random(identity, "原名")).pig
+        second = (await service.add_member(identity, "qq", "target", "关联猪")).pig
 
         # When the first show position is renamed
         renamed = await service.rename_pig(identity, 1, "新 名字")
@@ -181,7 +186,7 @@ def test_rename_pig_rejects_a_position_outside_the_pigsty(tmp_path: Path) -> Non
     service = PigstyService(JsonPigstyRepository(tmp_path))
 
     async def scenario() -> None:
-        original = await service.add_random(identity, "原名")
+        original = (await service.add_random(identity, "原名")).pig
 
         # When an absent show position is renamed
         with pytest.raises(PigPositionNotFoundError) as captured:
@@ -190,5 +195,68 @@ def test_rename_pig_rejects_a_position_outside_the_pigsty(tmp_path: Path) -> Non
         # Then the original document stays unchanged
         assert captured.value.position == 2
         assert await service.list_pigs(identity) == (original,)
+
+    run_async(scenario)
+
+
+def test_add_random_applies_the_initial_stat_roll(tmp_path: Path) -> None:
+    # Given an empty Pigsty for one owner and a seeded random source
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+
+    async def scenario() -> None:
+        # When an independent pig is added with a seeded roll
+        expected = roll_initial_stats(random.Random(42))
+        creation = await service.add_random(identity, rng=random.Random(42))
+
+        # Then every rolled value is persisted and the full roll is reported
+        assert creation.roll == expected
+        assert creation.pig.weight_kg == expected.values()["weight_kg"]
+        assert creation.pig.health == expected.values()["health"]
+        assert creation.pig.mood == expected.values()["mood"]
+        assert creation.pig.energy == expected.values()["energy"]
+        assert await service.list_pigs(identity) == (creation.pig,)
+
+    run_async(scenario)
+
+
+def test_add_member_applies_the_initial_stat_roll(tmp_path: Path) -> None:
+    # Given an empty Pigsty for one owner and a seeded random source
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+
+    async def scenario() -> None:
+        # When a member-linked pig is added with a seeded roll
+        expected = roll_initial_stats(random.Random(7))
+        creation = await service.add_member(
+            identity, "qq", "target", rng=random.Random(7)
+        )
+
+        # Then rolled stats, member association, and the roll report persist
+        assert creation.roll == expected
+        assert creation.pig.member_platform_id == "qq"
+        assert creation.pig.member_user_id == "target"
+        assert creation.pig.mood == expected.values()["mood"]
+        assert await service.list_pigs(identity) == (creation.pig,)
+
+    run_async(scenario)
+
+
+def test_creation_reports_stats_outside_the_normal_tier(tmp_path: Path) -> None:
+    # Given an empty Pigsty and a scripted roll with one extreme stat
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    rng = ScriptedRng(
+        randoms=[0.5, 0.99, 0.5, 0.5],
+        uniforms=[1.0, 0.0, 50.0, 1.0, 1.0],
+    )
+
+    async def scenario() -> None:
+        # When an independent pig is added
+        creation = await service.add_random(identity, rng=rng)
+
+        # Then only the extreme stat is reported as an anomaly
+        assert tuple(stat.key for stat in creation.roll.anomalies) == ("health",)
+        assert creation.pig.health == 50
 
     run_async(scenario)

@@ -9,6 +9,7 @@ from uuid import uuid4
 from typing_extensions import override
 
 from .models import Pig, PigstyDocument, utc_now
+from .randomizer import InitialStatsRoll, RandomSource, roll_initial_stats
 
 if TYPE_CHECKING:
     from .identity import SessionIdentity
@@ -38,6 +39,14 @@ class PigPositionNotFoundError(Exception):
         return f"pig position {self.position} does not exist"
 
 
+@dataclass(frozen=True, slots=True)
+class PigCreation:
+    """One persisted newborn pig together with its initial stat roll."""
+
+    pig: Pig
+    roll: InitialStatsRoll
+
+
 class PigstyService:
     """Create and read pigs within the repository-owned identity scope."""
 
@@ -46,20 +55,25 @@ class PigstyService:
         self._repository: JsonPigstyRepository = repository
 
     async def add_random(
-        self, identity: SessionIdentity, name: str | None = None
-    ) -> Pig:
-        """Create and persist an independent pig for one owner."""
+        self,
+        identity: SessionIdentity,
+        name: str | None = None,
+        rng: RandomSource | None = None,
+    ) -> PigCreation:
+        """Create and persist an independent pig with rolled initial stats."""
         pig_id = uuid4()
+        roll = roll_initial_stats(rng)
         pig = Pig(
             pig_id=pig_id,
             name=f"小猪-{pig_id.hex[:8]}" if name is None else name,
+            **roll.values(),
         )
 
         def append_pig(document: PigstyDocument) -> PigstyDocument:
             return document.model_copy(update={"pigs": (*document.pigs, pig)})
 
         _ = await self._repository.update(identity, append_pig)
-        return pig
+        return PigCreation(pig=pig, roll=roll)
 
     async def add_member(
         self,
@@ -67,14 +81,17 @@ class PigstyService:
         member_platform_id: str,
         member_user_id: str,
         name: str | None = None,
-    ) -> Pig:
-        """Create and persist a pig linked to one owner member pair."""
+        rng: RandomSource | None = None,
+    ) -> PigCreation:
+        """Create and persist a member-linked pig with rolled initial stats."""
         pig_id = uuid4()
+        roll = roll_initial_stats(rng)
         pig = Pig(
             pig_id=pig_id,
             member_platform_id=member_platform_id,
             member_user_id=member_user_id,
             name=f"小猪-{pig_id.hex[:8]}" if name is None else name,
+            **roll.values(),
         )
 
         def append_pig(document: PigstyDocument) -> PigstyDocument:
@@ -87,7 +104,7 @@ class PigstyService:
             return document.model_copy(update={"pigs": (*document.pigs, pig)})
 
         _ = await self._repository.update(identity, append_pig)
-        return pig
+        return PigCreation(pig=pig, roll=roll)
 
     async def rename_pig(
         self,
