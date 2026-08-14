@@ -136,7 +136,7 @@ async def assert_macro_commands() -> None:
     unknown_results = await collect(owner_event, "wat")
     assert unknown_results[0].text == (
         "用法\uff1apig status | pig add [@用户] [名字] | "
-        "pig rename <序号> <新名字> | pig show"
+        "pig rename <序号> <新名字> | pig diary [序号] | pig show"
     )
 
     empty_results = await collect(empty_owner_event, "show")
@@ -292,9 +292,98 @@ async def assert_random_stat_markers() -> None:
     assert normal_results[0].text == "已添加独立小猪\uff1a常态 小猪"
 
 
+async def assert_diary_and_daily_tick() -> None:
+    from datetime import timedelta
+
+    from astrbot_plugin_pigsty.core.models import PigEvent, utc_now
+
+    identity = resolve_session_identity(
+        PigstyScope.GROUP,
+        "qq",
+        "owner-a",
+        "group-1",
+    )
+    document = await plugin.repository.load(identity)
+    pig_count = len(document.pigs)
+    assert pig_count >= 2
+
+    for raw in ("pig diary 0", "pig diary abc"):
+        invalid_event = AstrMessageEvent(
+            sender_id="owner-a",
+            platform_id="qq",
+            group_id="group-1",
+            message_str=raw,
+        )
+        invalid_results = await collect(invalid_event, "diary")
+        assert invalid_results[0].text == "用法\uff1apig diary [序号]"
+
+    empty_results = await collect(empty_owner_event, "diary")
+    assert empty_results[0].text == "你的猪圈还没有值得记录的事件。"
+
+    future = utc_now() + timedelta(days=2)
+    summary = await plugin._run_daily_tick(future)
+    assert summary.evolved_pigs == pig_count
+    assert summary.recorded_events == pig_count
+    assert summary.failed_documents == 0
+
+    repeated = await plugin._run_daily_tick(future)
+    assert repeated.evolved_pigs == 0
+    assert repeated.recorded_events == 0
+
+    diary_results = await collect(owner_event, "diary")
+    assert diary_results[0].text == "你的猪圈还没有值得记录的事件。"
+
+    notable = PigEvent(
+        category="unexpected_events",
+        pig_id=document.pigs[0].pig_id,
+        occurred_at=utc_now(),
+        description="测试事件\uff1a捡到彩票",
+    )
+    updated_document = await plugin.repository.load(identity)
+    await plugin.repository.save(
+        updated_document.model_copy(
+            update={"events": (*updated_document.events, notable)}
+        )
+    )
+
+    diary_results = await collect(owner_event, "diary")
+    diary_text = diary_results[0].text
+    assert "\u7a81\u53d1\u4e8b\u4ef6" in diary_text
+    assert "捡到彩票" in diary_text
+    assert "\u4f8b\u884c\u4e8b\u4ef6" not in diary_text
+
+    first_diary_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="pig diary 1",
+    )
+    first_results = await collect(first_diary_event, "diary")
+    assert "捡到彩票" in first_results[0].text
+
+    other_diary_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="pig diary 2",
+    )
+    other_results = await collect(other_diary_event, "diary")
+    assert other_results[0].text == "这只小猪还没有值得记录的事件。"
+
+    out_of_range_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str=f"pig diary {pig_count + 1}",
+    )
+    out_of_range_results = await collect(out_of_range_event, "diary")
+    assert out_of_range_results[0].text == "用法\uff1apig diary [序号]"
+
+
 anyio.run(assert_status_result)
 anyio.run(assert_macro_commands)
 anyio.run(assert_random_stat_markers)
+anyio.run(assert_diary_and_daily_tick)
 """
 
     # When the plugin module is imported and initialized in a child process

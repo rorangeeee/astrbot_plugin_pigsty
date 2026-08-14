@@ -51,6 +51,15 @@ class JsonPigstyRepository:
         """Return the deterministic path for an identity without creating it."""
         return self._data_dir / identity.relative_path()
 
+    async def document_paths(self) -> tuple[Path, ...]:
+        """Return every persisted document path below the data directory."""
+        return await run_sync(self._discover_document_paths)
+
+    def _discover_document_paths(self) -> tuple[Path, ...]:
+        if not self._data_dir.is_dir():
+            return ()
+        return tuple(sorted(self._data_dir.rglob("*.json")))
+
     async def load(self, identity: SessionIdentity) -> PigstyDocument:
         """Load one document, returning an unpersisted empty document when absent."""
         return await self._load_unlocked(identity)
@@ -81,12 +90,33 @@ class JsonPigstyRepository:
             await run_sync(self._atomic_write, path, updated)
             return updated
 
+    async def update_path(
+        self,
+        path: Path,
+        mutation: Callable[[PigstyDocument], PigstyDocument],
+    ) -> PigstyDocument:
+        """Serialize one read-mutate-write operation for a discovered file."""
+        async with self._lock:
+            current = await self._read_existing(path)
+            updated = self._validate_document(mutation(current), path)
+            if self.path_for(updated.to_identity()) != path:
+                raise PigstyDataError(path, "mutation changed the document identity")
+            await run_sync(self._atomic_write, path, updated)
+            return updated
+
     async def _load_unlocked(self, identity: SessionIdentity) -> PigstyDocument:
         path = self.path_for(identity)
         try:
-            document = await run_sync(self._read_document, path)
+            return await self._read_existing(path)
         except FileNotFoundError:
             return PigstyDocument.empty_for_identity(identity)
+
+    async def _read_existing(self, path: Path) -> PigstyDocument:
+        """Read and validate one persisted document; missing files propagate."""
+        try:
+            document = await run_sync(self._read_document, path)
+        except FileNotFoundError:
+            raise
         except (
             OSError,
             UnicodeDecodeError,
@@ -95,7 +125,7 @@ class JsonPigstyRepository:
         ) as error:
             raise PigstyDataError(path, str(error)) from error
 
-        if document.to_identity().relative_key != identity.relative_key:
+        if self.path_for(document.to_identity()) != path:
             raise PigstyDataError(path, "document identity does not match its path")
         return document
 

@@ -3,7 +3,7 @@ from uuid import UUID
 
 import pytest
 from core.identity import PigstyScope, resolve_session_identity
-from core.models import Pig, PigstyDocument
+from core.models import Pig, PigEvent, PigstyDocument
 from pydantic import ValidationError
 
 
@@ -216,3 +216,123 @@ def test_document_serializes_pigs_as_json_array() -> None:
 
     # Then the persisted JSON uses the documented array shape
     assert '"pigs":[]' in raw
+
+
+def test_pig_event_normalizes_timestamp_and_generates_uuid() -> None:
+    # Given a pig reference and an aware timestamp in GMT+8
+    pig = Pig(name="Lucky")
+    occurred = datetime(2026, 8, 14, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    # When a regular event is created
+    event = PigEvent(
+        category="regular_events",
+        pig_id=pig.pig_id,
+        occurred_at=occurred,
+        description="年龄+1",
+    )
+
+    # Then it carries an internal UUID and stores the moment in UTC
+    assert isinstance(event.event_id, UUID)
+    assert event.pig_id == pig.pig_id
+    assert event.occurred_at.hour == 1
+    assert event.occurred_at.tzinfo is UTC
+
+
+@pytest.mark.parametrize(
+    "category",
+    ["regular_events", "unexpected_events", "user_events"],
+)
+def test_pig_event_accepts_known_categories(category: str) -> None:
+    # Given one approved event category
+    # When an event is created with it
+    event = PigEvent(
+        category=category,
+        pig_id=Pig(name="Lucky").pig_id,
+        description="测试",
+    )
+
+    # Then the category persists unchanged
+    assert event.category == category
+
+
+def test_pig_event_rejects_unknown_category() -> None:
+    # Given an event category outside the approved set
+    # When the boundary model parses it
+    with pytest.raises(ValidationError):
+        _ = PigEvent(
+            category="admin_events",
+            pig_id=Pig(name="Lucky").pig_id,
+            description="测试",
+        )
+
+    # Then the unknown category is rejected
+
+
+@pytest.mark.parametrize("description", ["", "   "])
+def test_pig_event_rejects_blank_description(description: str) -> None:
+    # Given a blank event description
+    # When the boundary model parses it
+    with pytest.raises(ValidationError):
+        _ = PigEvent(
+            category="regular_events",
+            pig_id=Pig(name="Lucky").pig_id,
+            description=description,
+        )
+
+    # Then the blank description is rejected
+
+
+def test_pig_event_rejects_naive_timestamp() -> None:
+    # Given a timestamp without timezone information
+    naive = datetime(2026, 8, 14, 9, 0, tzinfo=UTC).replace(tzinfo=None)
+
+    # When it crosses the PigEvent boundary
+    with pytest.raises(ValidationError):
+        _ = PigEvent(
+            category="regular_events",
+            pig_id=Pig(name="Lucky").pig_id,
+            description="测试",
+            occurred_at=naive,
+        )
+
+    # Then the ambiguous timestamp is rejected
+
+
+def test_document_parses_legacy_json_without_events() -> None:
+    # Given legacy JSON written before events existed
+    raw = """
+    {
+      "schema_version": 1,
+      "scope": "global",
+      "platform_id": "qq",
+      "owner_user_id": "42",
+      "group_id": null,
+      "pigs": []
+    }
+    """
+
+    # When the persistence boundary parses it
+    document = PigstyDocument.model_validate_json(raw)
+
+    # Then the missing events field defaults to an empty record
+    assert document.events == ()
+
+
+def test_document_round_trip_preserves_events() -> None:
+    # Given a document with one recorded event
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "42", None)
+    pig = Pig(name="Lucky")
+    event = PigEvent(
+        category="unexpected_events",
+        pig_id=pig.pig_id,
+        description="测试事件",
+    )
+    document = PigstyDocument.empty_for_identity(identity).model_copy(
+        update={"pigs": (pig,), "events": (event,)}
+    )
+
+    # When it is serialized and parsed at the JSON boundary
+    restored = PigstyDocument.model_validate_json(document.model_dump_json())
+
+    # Then the event record is preserved exactly
+    assert restored == document

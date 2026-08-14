@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+from datetime import timedelta
 from typing import TYPE_CHECKING, TypeVar
 
 import anyio
@@ -258,5 +259,107 @@ def test_creation_reports_stats_outside_the_normal_tier(tmp_path: Path) -> None:
         # Then only the extreme stat is reported as an anomaly
         assert tuple(stat.key for stat in creation.roll.anomalies) == ("health",)
         assert creation.pig.health == 50
+
+    run_async(scenario)
+
+
+def test_evolve_all_due_evolves_every_due_pig(tmp_path: Path) -> None:
+    # Given two owners each with one pig
+    repo = JsonPigstyRepository(tmp_path)
+    service = PigstyService(repo)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+    other = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-b", None)
+
+    async def scenario() -> None:
+        first = (await service.add_random(identity)).pig
+        second = (await service.add_member(other, "qq", "target")).pig
+        future = first.last_state_update_at + timedelta(days=2)
+
+        # When a daily trigger runs two days later
+        summary = await service.evolve_all_due(future)
+
+        # Then both pigs are evolved once and one real-time event is recorded each
+        assert summary.evolved_pigs == 2
+        assert summary.recorded_events == 2
+        assert summary.failed_documents == 0
+        assert summary.scanned_documents == 2
+        pigs = await service.list_pigs(identity)
+        assert pigs[0].age_days == first.age_days + 2
+        assert pigs[0].weight_kg > first.weight_kg
+        events = await service.list_events(identity)
+        assert len(events) == 1
+        assert events[0].pig_id == first.pig_id
+        assert events[0].description.startswith("年龄+2")
+        other_pigs = await service.list_pigs(other)
+        assert other_pigs[0].age_days == second.age_days + 2
+
+    run_async(scenario)
+
+
+def test_evolve_all_due_is_idempotent_within_one_day(tmp_path: Path) -> None:
+    # Given one owner with one pig
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        pig = (await service.add_random(identity)).pig
+        future = pig.last_state_update_at + timedelta(days=1)
+
+        # When the same trigger moment runs twice
+        first_summary = await service.evolve_all_due(future)
+        second_summary = await service.evolve_all_due(future)
+
+        # Then the second pass finds nothing owed
+        assert first_summary.evolved_pigs == 1
+        assert second_summary.evolved_pigs == 0
+        assert second_summary.recorded_events == 0
+        events = await service.list_events(identity)
+        assert len(events) == 1
+
+    run_async(scenario)
+
+
+def test_evolve_all_due_skips_fresh_pigs(tmp_path: Path) -> None:
+    # Given one pig created moments ago
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        pig = (await service.add_random(identity)).pig
+
+        # When a trigger runs one hour after creation
+        future = pig.last_state_update_at + timedelta(hours=1)
+        summary = await service.evolve_all_due(future)
+
+        # Then the same-day pig is not evolved
+        assert summary.evolved_pigs == 0
+        assert summary.recorded_events == 0
+        assert await service.list_events(identity) == ()
+
+    run_async(scenario)
+
+
+def test_evolve_all_due_tolerates_corrupt_documents(tmp_path: Path) -> None:
+    # Given one valid pig and one corrupt owner document
+    repo = JsonPigstyRepository(tmp_path)
+    service = PigstyService(repo)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+    other = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-b", None)
+
+    async def scenario() -> None:
+        valid = (await service.add_random(identity)).pig
+        path = repo.path_for(other)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        _ = path.write_text("{not-json", encoding="utf-8")
+        future = valid.last_state_update_at + timedelta(days=1)
+
+        # When the daily trigger runs
+        summary = await service.evolve_all_due(future)
+
+        # Then the corrupt document is reported while valid pigs still evolve
+        assert summary.failed_documents == 1
+        assert summary.evolved_pigs == 1
+        pigs = await service.list_pigs(identity)
+        assert pigs[0].age_days == valid.age_days + 1
 
     run_async(scenario)

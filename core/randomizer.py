@@ -122,9 +122,14 @@ class InitialStatsRoll:
         return {stat.key: stat.value for stat in self.stats}
 
 
+def default_random_source() -> random.Random:
+    """Return a fresh system-seeded random source."""
+    return random.Random()
+
+
 def roll_initial_stats(rng: RandomSource | None = None) -> InitialStatsRoll:
     """Roll every newborn stat independently through the offset tiers."""
-    source = rng if rng is not None else random.Random()
+    source = rng if rng is not None else default_random_source()
     return InitialStatsRoll(tuple(_roll_stat(spec, source) for spec in STAT_SPECS))
 
 

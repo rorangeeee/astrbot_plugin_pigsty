@@ -19,11 +19,31 @@ from pydantic_core import PydanticCustomError
 from .identity import PigstyScope, SessionIdentity
 
 CURRENT_SCHEMA_VERSION: Final = 1
+REGULAR_EVENT_CATEGORY: Final = "regular_events"
+UNEXPECTED_EVENT_CATEGORY: Final = "unexpected_events"
+USER_EVENT_CATEGORY: Final = "user_events"
+
+EventCategory = Literal[
+    "regular_events",
+    "unexpected_events",
+    "user_events",
+]
 
 
 def utc_now() -> datetime:
     """Return the current timezone-aware UTC timestamp."""
     return datetime.now(UTC)
+
+
+def _normalize_utc_timestamp(value: datetime) -> datetime:
+    """Require an aware timestamp and return the same instant in UTC."""
+    if value.tzinfo is None or value.utcoffset() is None:
+        error_type = "timezone_required"
+        raise PydanticCustomError(
+            error_type,
+            "timestamp must include timezone information",
+        )
+    return value.astimezone(UTC)
 
 
 class Pig(BaseModel):
@@ -102,13 +122,44 @@ class Pig(BaseModel):
     @classmethod
     def normalize_timestamp(cls, value: datetime) -> datetime:
         """Require timezone-aware timestamps and store them in UTC."""
-        if value.tzinfo is None or value.utcoffset() is None:
-            error_type = "timezone_required"
+        return _normalize_utc_timestamp(value)
+
+
+class PigEvent(BaseModel):
+    """One recorded event that changed a pig's state."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        strict=True,
+        frozen=True,
+        extra="forbid",
+        validate_default=True,
+        revalidate_instances="always",
+    )
+
+    event_id: UUID = Field(default_factory=uuid4)
+    category: EventCategory
+    pig_id: UUID
+    occurred_at: datetime = Field(default_factory=utc_now)
+    description: str = Field(min_length=1, max_length=200)
+
+    @field_validator("occurred_at", mode="after")
+    @classmethod
+    def normalize_occurred_at(cls, value: datetime) -> datetime:
+        """Require an aware timestamp and store it in UTC."""
+        return _normalize_utc_timestamp(value)
+
+    @field_validator("description")
+    @classmethod
+    def reject_blank_description(cls, value: str, info: ValidationInfo) -> str:
+        """Reject descriptions that contain no non-space characters."""
+        if not value.strip():
+            error_type = "blank_string"
             raise PydanticCustomError(
                 error_type,
-                "timestamp must include timezone information",
+                "{field_name} must contain a non-space character",
+                {"field_name": info.field_name},
             )
-        return value.astimezone(UTC)
+        return value
 
 
 class PigstyDocument(BaseModel):
@@ -128,6 +179,7 @@ class PigstyDocument(BaseModel):
     owner_user_id: str = Field(min_length=1)
     group_id: str | None = None
     pigs: tuple[Pig, ...] = ()
+    events: tuple[PigEvent, ...] = ()
 
     @field_validator("platform_id", "owner_user_id")
     @classmethod

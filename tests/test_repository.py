@@ -199,3 +199,92 @@ def test_corrupt_json_raises_without_overwriting_file(tmp_path: Path) -> None:
     # Then the error identifies the path and the corrupt content remains untouched
     assert captured.value.path == path
     assert path.read_text(encoding="utf-8") == corrupt_content
+
+
+def test_document_paths_lists_persisted_documents(tmp_path: Path) -> None:
+    # Given two owners with saved documents
+    repo = JsonPigstyRepository(tmp_path)
+    first = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+    second = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-b", None)
+
+    async def scenario() -> None:
+        await repo.save(make_document(first))
+        await repo.save(make_document(second))
+
+        # When the persisted paths are discovered
+        paths = await repo.document_paths()
+
+        # Then both documents are listed in deterministic order
+        assert paths == tuple(sorted((repo.path_for(first), repo.path_for(second))))
+
+    run_async(scenario)
+
+
+def test_document_paths_returns_nothing_for_empty_directory(tmp_path: Path) -> None:
+    # Given an empty repository
+    repo = JsonPigstyRepository(tmp_path)
+
+    # When the persisted paths are discovered
+    paths = run_async(repo.document_paths)
+
+    # Then no paths are returned
+    assert paths == ()
+
+
+def test_update_path_applies_mutation_to_a_discovered_file(tmp_path: Path) -> None:
+    # Given a saved document for one owner
+    repo = JsonPigstyRepository(tmp_path)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        await repo.save(make_document(identity))
+        path = repo.path_for(identity)
+        pig = make_pig("added")
+
+        def mutation(document: PigstyDocument) -> PigstyDocument:
+            return document.model_copy(update={"pigs": (pig,)})
+
+        # When a mutation runs against the discovered path
+        updated = await repo.update_path(path, mutation)
+
+        # Then the change is persisted and visible on reload
+        assert updated.pigs == (pig,)
+        loaded = await repo.load(identity)
+        assert loaded.pigs == (pig,)
+
+    run_async(scenario)
+
+
+def test_update_path_rejects_a_missing_file(tmp_path: Path) -> None:
+    # Given a path that does not exist below the data directory
+    repo = JsonPigstyRepository(tmp_path)
+    missing = tmp_path / "owners" / "global" / "absent.json"
+
+    def identity(document: PigstyDocument) -> PigstyDocument:
+        return document
+
+    # When an update targets the missing file
+    with pytest.raises(FileNotFoundError):
+        _ = run_async(lambda: repo.update_path(missing, identity))
+
+    # Then no document is created
+    assert not missing.exists()
+
+
+def test_update_path_rejects_identity_changes(tmp_path: Path) -> None:
+    # Given a saved document for one owner
+    repo = JsonPigstyRepository(tmp_path)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        await repo.save(make_document(identity))
+
+        def mutation(document: PigstyDocument) -> PigstyDocument:
+            return document.model_copy(update={"owner_user_id": "owner-b"})
+
+        # When a mutation rewrites the persisted identity
+        # Then the repository rejects the mutated document
+        with pytest.raises(PigstyDataError):
+            _ = await repo.update_path(repo.path_for(identity), mutation)
+
+    run_async(scenario)

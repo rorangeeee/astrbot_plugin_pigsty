@@ -3,16 +3,27 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from typing_extensions import override
 
+from .evolution import evolve_document, is_due
 from .models import Pig, PigstyDocument, utc_now
-from .randomizer import InitialStatsRoll, RandomSource, roll_initial_stats
+from .randomizer import (
+    InitialStatsRoll,
+    RandomSource,
+    default_random_source,
+    roll_initial_stats,
+)
+from .repository import PigstyDataError
 
 if TYPE_CHECKING:
+    from datetime import datetime
+
     from .identity import SessionIdentity
+    from .models import PigEvent
     from .repository import JsonPigstyRepository
 
 
@@ -45,6 +56,31 @@ class PigCreation:
 
     pig: Pig
     roll: InitialStatsRoll
+
+
+@dataclass(frozen=True, slots=True)
+class DailyTickSummary:
+    """Outcome of one real-time daily evolution trigger."""
+
+    ticked_at: datetime
+    evolved_pigs: int
+    recorded_events: int
+    scanned_documents: int
+    skipped_documents: int
+    failed_documents: int
+
+
+def _evolve_document_mutation(
+    document: PigstyDocument,
+    now: datetime,
+    rng: RandomSource,
+    stats: list[int],
+) -> PigstyDocument:
+    """Apply one evolution pass and report pig and event counts."""
+    evolved = evolve_document(document, now, rng)
+    stats[0] += sum(1 for pig in document.pigs if is_due(pig, now))
+    stats[1] += len(evolved.events) - len(document.events)
+    return evolved
 
 
 class PigstyService:
@@ -132,3 +168,47 @@ class PigstyService:
         """Return the persisted pigs for one owner in creation order."""
         document = await self._repository.load(identity)
         return document.pigs
+
+    async def list_events(self, identity: SessionIdentity) -> tuple[PigEvent, ...]:
+        """Return the persisted events for one owner in record order."""
+        document = await self._repository.load(identity)
+        return document.events
+
+    async def evolve_all_due(
+        self,
+        now: datetime,
+        rng: RandomSource | None = None,
+    ) -> DailyTickSummary:
+        """Evolve every due pig across all documents and record real-time events."""
+        source = rng if rng is not None else default_random_source()
+        paths = await self._repository.document_paths()
+        evolved_pigs = 0
+        recorded_events = 0
+        skipped_documents = 0
+        failed_documents = 0
+        for path in paths:
+            stats = [0, 0]
+            mutation = partial(
+                _evolve_document_mutation,
+                now=now,
+                rng=source,
+                stats=stats,
+            )
+            try:
+                _ = await self._repository.update_path(path, mutation)
+            except FileNotFoundError:
+                skipped_documents += 1
+                continue
+            except PigstyDataError:
+                failed_documents += 1
+                continue
+            evolved_pigs += stats[0]
+            recorded_events += stats[1]
+        return DailyTickSummary(
+            ticked_at=now,
+            evolved_pigs=evolved_pigs,
+            recorded_events=recorded_events,
+            scanned_documents=len(paths),
+            skipped_documents=skipped_documents,
+            failed_documents=failed_documents,
+        )
