@@ -14,9 +14,19 @@
    触发后次日重置 20%。
 3. **判定时刻**：与例行演化同一天概念（9:00 触发判定）。同一 GMT+8 自然日内
    每只小猪最多掷一次（按 `unexpected_last_rolled_at` 判重）。
-4. **影响数值**：随机 1 或 2 项（各 50%，两项不重复），范围与每日演化规则一致：
-   体重增长 (0, 1kg]、心情 ±5、健康 ±3、精力 0–100 重掷。应用时夹紧到模型边界；
-   只更新 `updated_at`，**不改** `last_state_update_at`（演化欠账标记语义不变）。
+4. **影响数值**：随机 1 或 2 项（各 50%，两项不重复）；每项受影响数值独立掷档
+   （与初始数值随机同一机制，相对**当前值**、方向双向随机）：
+
+   | 概率 | 偏移幅度 | 采样方式 |
+   | --- | --- | --- |
+   | 75% | ≤5% | `当前值 × uniform(0.95, 1.05)` |
+   | 15% | 5%–20% | `当前值 × uniform(0.05, 0.20)`，方向 ± |
+   | 8% | 20%–50% | `当前值 × uniform(0.20, 0.50)`，方向 ± |
+   | 2% | ≥50% | 有界字段在 `[0, 当前值×0.5] ∪ [当前值×1.5, 100]` 有效子区间均匀；体重负侧 `(0, 当前值×0.5]` 均匀、正侧重尾分布无上限 |
+
+   复用 `core/randomizer.py` 的 `StatSpec`/`roll_stat`（以当前值为 base）；结果记录为
+   相对当前值的带符号 delta。应用时夹紧到模型边界；只更新 `updated_at`，
+   **不改** `last_state_update_at`（演化欠账标记语义不变）。
 5. **推送时刻**：当天 GMT+8 9:00–18:00 均匀随机；若触发发生在 18:00 之后
    （启动补触发），随机时刻已过则立即推送。
 6. **推送位置**：按猪圈上下文——群猪圈推到对应群聊，全局/私聊猪圈私聊主人
@@ -51,7 +61,8 @@ LLM 构造请求 prompt：
 - `core/unexpected.py`（新增，纯函数）：pity 阶梯 `next_chance`、同日判重
   `already_rolled_today`、单猪掷骰 `roll_unexpected_for_pig`、1–2 项采样
   `roll_stat_changes`、变化应用 `apply_stat_changes`、窗口时刻
-  `pick_unexpected_moment`。复用 `evolution` 的数值常量与 `RandomSource` 协议。
+  `pick_unexpected_moment`。四档掷点复用 `randomizer` 的 `StatSpec`/`roll_stat`
+  （以当前值为 base）与 `RandomSource` 协议。
 - `core/models.py`：`Pig` 新增 `unexpected_chance_percent`（默认 20，20–100）与
   `unexpected_last_rolled_at`（默认 None，UTC 规范化）；旧 JSON 直接兼容。
 - `core/service.py`：`roll_unexpected_all(now, rng)` 遍历所有文档掷骰并持久化 pity，

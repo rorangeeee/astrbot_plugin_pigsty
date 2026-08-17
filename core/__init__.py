@@ -28,8 +28,10 @@ from .randomizer import (
     InitialStatsRoll,
     RolledStat,
     RollTier,
+    StatSpec,
     default_random_source,
     roll_initial_stats,
+    roll_stat,
 )
 from .repository import JsonPigstyRepository, PigstyDataError
 from .service import (
@@ -72,6 +74,7 @@ __all__ = [
     "RolledStat",
     "SessionIdentity",
     "StatChange",
+    "StatSpec",
     "UnexpectedOutcome",
     "UnexpectedPigNotFoundError",
     "UnexpectedRoll",
@@ -88,6 +91,7 @@ __all__ = [
     "pick_unexpected_moment",
     "resolve_session_identity",
     "roll_initial_stats",
+    "roll_stat",
     "roll_stat_changes",
     "roll_unexpected_for_pig",
     "utc_now",

@@ -4,19 +4,17 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, time, timedelta
-from typing import TYPE_CHECKING, Final, Literal
+from typing import TYPE_CHECKING, Final
 
-from .evolution import (
-    DAY_TZ,
-    ENERGY_LOWER_BOUND,
-    ENERGY_UPPER_BOUND,
-    HEALTH_DAILY_DRIFT,
-    MOOD_DAILY_DRIFT,
-    WEIGHT_DAILY_GROWTH_MAX,
-    WEIGHT_DAILY_GROWTH_MIN,
-)
+from .evolution import DAY_TZ
 from .models import Pig
-from .randomizer import WEIGHT_LOWER_BOUND, WEIGHT_ROUND_DIGITS
+from .randomizer import (
+    BOUNDED_UPPER_BOUND,
+    WEIGHT_LOWER_BOUND,
+    WEIGHT_ROUND_DIGITS,
+    StatSpec,
+    roll_stat,
+)
 
 if TYPE_CHECKING:
     from .randomizer import RandomSource
@@ -31,16 +29,13 @@ UNEXPECTED_TWO_FIELDS: Final = 2
 
 _STAT_FIELDS: Final = ("weight_kg", "health", "mood", "energy")
 
-ChangeKind = Literal["offset", "reroll"]
-
 
 @dataclass(frozen=True, slots=True)
 class StatChange:
-    """One stat change sampled for an unexpected event."""
+    """One signed stat delta sampled for an unexpected event."""
 
     key: str
-    kind: ChangeKind
-    value: float | int
+    delta: float | int
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,7 +73,7 @@ def roll_unexpected_for_pig(
         return UnexpectedRoll(pig=pig, rolled=False, triggered=False, changes=())
     triggered = rng.random() < pig.unexpected_chance_percent / 100
     chance_after = next_chance(pig.unexpected_chance_percent, triggered)
-    changes = roll_stat_changes(rng) if triggered else ()
+    changes = roll_stat_changes(pig, rng) if triggered else ()
     updated = Pig.model_validate(
         pig.model_dump()
         | {
@@ -94,8 +89,8 @@ def roll_unexpected_for_pig(
     )
 
 
-def roll_stat_changes(rng: RandomSource) -> tuple[StatChange, ...]:
-    """Sample one or two distinct stat changes with daily-rule magnitudes."""
+def roll_stat_changes(pig: Pig, rng: RandomSource) -> tuple[StatChange, ...]:
+    """Sample one or two distinct stat deltas through the offset tiers."""
     count = (
         1 if rng.random() < UNEXPECTED_SECOND_FIELD_CHANCE else UNEXPECTED_TWO_FIELDS
     )
@@ -106,36 +101,61 @@ def roll_stat_changes(rng: RandomSource) -> tuple[StatChange, ...]:
             index for index in range(len(_STAT_FIELDS)) if index != first_index
         ]
         chosen.append(rng.choice(remaining))
-    changes = [_sample_change(_STAT_FIELDS[index], rng) for index in sorted(chosen)]
-    return tuple(changes)
+    return tuple(_change_for(pig, _STAT_FIELDS[index], rng) for index in sorted(chosen))
 
 
-def _sample_change(key: str, rng: RandomSource) -> StatChange:
+def _change_for(pig: Pig, key: str, rng: RandomSource) -> StatChange:
+    rolled = roll_stat(_spec_for(pig, key), rng)
+    return StatChange(key=key, delta=rolled.value - _current_value(pig, key))
+
+
+def _spec_for(pig: Pig, key: str) -> StatSpec:
     match key:
         case "weight_kg":
-            growth = max(
-                round(rng.uniform(0.0, WEIGHT_DAILY_GROWTH_MAX), WEIGHT_ROUND_DIGITS),
-                WEIGHT_DAILY_GROWTH_MIN,
-            )
-            return StatChange(key=key, kind="offset", value=growth)
-        case "mood":
-            return StatChange(
-                key=key,
-                kind="offset",
-                value=round(rng.uniform(-MOOD_DAILY_DRIFT, MOOD_DAILY_DRIFT)),
+            return StatSpec(
+                key="weight_kg",
+                base=pig.weight_kg,
+                integer=False,
+                upper_bound=None,
+                lower_bound=WEIGHT_LOWER_BOUND,
+                round_digits=WEIGHT_ROUND_DIGITS,
             )
         case "health":
-            return StatChange(
-                key=key,
-                kind="offset",
-                value=round(rng.uniform(-HEALTH_DAILY_DRIFT, HEALTH_DAILY_DRIFT)),
+            return StatSpec(
+                key="health",
+                base=float(pig.health),
+                integer=True,
+                upper_bound=BOUNDED_UPPER_BOUND,
+            )
+        case "mood":
+            return StatSpec(
+                key="mood",
+                base=float(pig.mood),
+                integer=True,
+                upper_bound=BOUNDED_UPPER_BOUND,
             )
         case "energy":
-            return StatChange(
-                key=key,
-                kind="reroll",
-                value=round(rng.uniform(ENERGY_LOWER_BOUND, ENERGY_UPPER_BOUND)),
+            return StatSpec(
+                key="energy",
+                base=float(pig.energy),
+                integer=True,
+                upper_bound=BOUNDED_UPPER_BOUND,
             )
+        case _:
+            message = f"unknown stat field {key!r}"
+            raise ValueError(message)
+
+
+def _current_value(pig: Pig, key: str) -> float | int:
+    match key:
+        case "weight_kg":
+            return pig.weight_kg
+        case "health":
+            return pig.health
+        case "mood":
+            return pig.mood
+        case "energy":
+            return pig.energy
         case _:
             message = f"unknown stat field {key!r}"
             raise ValueError(message)
@@ -146,26 +166,24 @@ def apply_stat_changes(
     changes: tuple[StatChange, ...],
     occurred_at: datetime,
 ) -> Pig:
-    """Apply unexpected stat changes without touching the evolution marker."""
+    """Apply unexpected stat deltas without touching the evolution marker."""
     updates: dict[str, float | int | datetime] = {}
     for change in changes:
-        match change.kind:
-            case "offset":
-                match change.key:
-                    case "weight_kg":
-                        updates["weight_kg"] = max(
-                            round(pig.weight_kg + change.value, WEIGHT_ROUND_DIGITS),
-                            WEIGHT_LOWER_BOUND,
-                        )
-                    case "mood":
-                        updates["mood"] = _clamp_int(pig.mood + change.value)
-                    case "health":
-                        updates["health"] = _clamp_int(pig.health + change.value)
-                    case _:
-                        message = f"unknown offset field {change.key!r}"
-                        raise ValueError(message)
-            case "reroll":
-                updates["energy"] = _clamp_int(change.value)
+        match change.key:
+            case "weight_kg":
+                updates["weight_kg"] = max(
+                    round(pig.weight_kg + change.delta, WEIGHT_ROUND_DIGITS),
+                    WEIGHT_LOWER_BOUND,
+                )
+            case "mood":
+                updates["mood"] = _clamp_int(pig.mood + change.delta)
+            case "health":
+                updates["health"] = _clamp_int(pig.health + change.delta)
+            case "energy":
+                updates["energy"] = _clamp_int(pig.energy + change.delta)
+            case _:
+                message = f"unknown stat field {change.key!r}"
+                raise ValueError(message)
     updates["updated_at"] = occurred_at
     return Pig.model_validate(pig.model_dump() | updates)
 

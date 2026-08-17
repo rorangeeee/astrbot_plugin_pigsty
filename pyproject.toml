@@ -65,6 +65,7 @@ unfixable = []
     "S101",
     "ARG",
     "PLR2004",
+    "PLR0913", # Test helpers carry every configurable pig field.
     "SLF001",
     "D",
     "S311", # Tests use seeded pseudo-random draws for deterministic gameplay rolls.

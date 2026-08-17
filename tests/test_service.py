@@ -375,8 +375,14 @@ def test_roll_unexpected_all_collects_triggered_drafts(tmp_path: Path) -> None:
     identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
 
     async def scenario() -> None:
-        first = (await service.add_random(identity)).pig
-        second = (await service.add_random(identity)).pig
+        def fixed_initial_rng() -> ScriptedRng:
+            return ScriptedRng(
+                randoms=[0.0, 0.0, 0.0, 0.0],
+                uniforms=[1.0, 1.0, 1.0, 1.0],
+            )
+
+        first = (await service.add_random(identity, rng=fixed_initial_rng())).pig
+        second = (await service.add_random(identity, rng=fixed_initial_rng())).pig
         now = first.last_state_update_at + timedelta(days=1)
         document = await repo.load(identity)
         prepared = document.model_copy(
@@ -393,8 +399,12 @@ def test_roll_unexpected_all_collects_triggered_drafts(tmp_path: Path) -> None:
         )
         await repo.save(prepared)
 
-        # When every pig rolls with a scripted mood-event draw
-        rng = ScriptedRng(randoms=[0.5, 0.3], choices=[1], uniforms=[-2.0])
+        # When every pig rolls with a scripted normal-tier mood draw
+        rng = ScriptedRng(
+            randoms=[0.5, 0.3, 0.3],  # trigger; one field; normal tier
+            choices=[2],  # the mood field
+            uniforms=[0.95],  # mood 70 -> 66.5 -> rounds to 66
+        )
         outcomes = await service.roll_unexpected_all(now, rng)
 
         # Then only the armed pig triggers and its pity state resets
@@ -402,7 +412,7 @@ def test_roll_unexpected_all_collects_triggered_drafts(tmp_path: Path) -> None:
         outcome = outcomes[0]
         assert outcome.pig.pig_id == first.pig_id
         assert tuple(change.key for change in outcome.changes) == ("mood",)
-        assert outcome.changes[0].value == -2
+        assert outcome.changes[0].delta == -4
         reloaded = await repo.load(identity)
         assert reloaded.pigs[0].unexpected_chance_percent == 20
         assert reloaded.pigs[0].unexpected_last_rolled_at == now
@@ -440,10 +450,18 @@ def test_apply_unexpected_event_updates_pig_and_records_event(tmp_path: Path) ->
     identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
 
     async def scenario() -> None:
-        pig = (await service.add_random(identity)).pig
+        pig = (
+            await service.add_random(
+                identity,
+                rng=ScriptedRng(
+                    randoms=[0.0, 0.0, 0.0, 0.0],
+                    uniforms=[1.0, 1.0, 1.0, 1.0],
+                ),
+            )
+        ).pig
         changes = (
-            StatChange(key="weight_kg", kind="offset", value=0.53),
-            StatChange(key="energy", kind="reroll", value=42),
+            StatChange(key="weight_kg", delta=0.53),
+            StatChange(key="energy", delta=-38),
         )
         occurred = pig.last_state_update_at + timedelta(hours=1)
 
@@ -479,7 +497,7 @@ def test_apply_unexpected_event_rejects_missing_pig(tmp_path: Path) -> None:
             _ = await service.apply_unexpected_event(
                 identity,
                 uuid4(),
-                (StatChange(key="mood", kind="offset", value=-1),),
+                (StatChange(key="mood", delta=-1),),
                 "摔了一跤",
                 datetime(2026, 8, 14, 9, 0, tzinfo=timezone(timedelta(hours=8))),
             )

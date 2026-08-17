@@ -27,6 +27,7 @@ def make_pig(
     mood: int = 50,
     health: int = 50,
     weight_kg: float = 5.0,
+    energy: int = 80,
 ) -> Pig:
     """Build a deterministic pig with configured unexpected-event state."""
     return Pig(
@@ -34,6 +35,7 @@ def make_pig(
         mood=mood,
         health=health,
         weight_kg=weight_kg,
+        energy=energy,
         unexpected_chance_percent=chance,
         unexpected_last_rolled_at=last_rolled_at,
     )
@@ -103,73 +105,148 @@ def test_roll_not_triggered_climbs_the_pity_chance() -> None:
 
 
 def test_roll_triggered_resets_chance_and_samples_changes() -> None:
-    # Given a 100% pig and a scripted one-field roll
+    # Given a 100% pig and a scripted normal-tier mood roll
     now = datetime(2026, 8, 14, 10, 0, tzinfo=DAY_TZ)
-    pig = make_pig(chance=100)
+    pig = make_pig(chance=100, mood=50)
     rng = ScriptedRng(
-        randoms=[0.5, 0.3],  # trigger draw; field-count draw (one field)
+        randoms=[0.5, 0.3, 0.3],  # trigger; one field; normal tier
         choices=[2],  # the mood field
-        uniforms=[-2.0],  # mood drift
+        uniforms=[0.95],  # mood factor -> 47.5 -> rounds to 48
     )
 
     # When the dice rolls
     roll = roll_unexpected_for_pig(pig, now, rng)
 
-    # Then the event triggers, chance resets, and one mood change is sampled
+    # Then the event triggers, chance resets, and the mood delta is recorded
     assert roll.rolled is True
     assert roll.triggered is True
     assert roll.pig.unexpected_chance_percent == 20
     assert roll.pig.unexpected_last_rolled_at == now
     assert len(roll.changes) == 1
     assert roll.changes[0].key == "mood"
-    assert roll.changes[0].value == -2
+    assert roll.changes[0].delta == -2
 
 
 def test_roll_stat_changes_picks_two_distinct_fields() -> None:
-    # Given a scripted draw forcing two fields (weight and energy)
+    # Given a scripted two-field roll: weight (normal) and energy (major)
+    pig = make_pig(weight_kg=5.0, energy=80)
     rng = ScriptedRng(
-        randoms=[0.7],  # field-count draw (two fields)
-        choices=[0, 3],  # weight element, then the energy element
-        uniforms=[0.53, 65.0],  # weight growth; energy reroll
+        randoms=[0.7, 0.3, 0.9],  # two fields; weight tier; energy tier
+        choices=[0, 3, 1],  # weight field; energy field; positive sign
+        uniforms=[0.95, 0.20],  # weight factor; energy magnitude factor
     )
 
     # When changes are sampled
-    changes = roll_stat_changes(rng)
+    changes = roll_stat_changes(pig, rng)
 
-    # Then exactly two distinct fields are returned in canonical order
+    # Then exactly two distinct fields return their signed deltas
     assert tuple(change.key for change in changes) == ("weight_kg", "energy")
-    assert changes[0].kind == "offset"
-    assert changes[0].value == pytest.approx(0.53)
-    assert changes[1].kind == "reroll"
-    assert changes[1].value == 65
+    assert changes[0].delta == pytest.approx(-0.25)
+    assert changes[1].delta == 16
 
 
-def test_roll_stat_changes_respects_daily_magnitudes() -> None:
-    # Given a deterministic seeded random source
-    rng = random.Random(3)
+def test_normal_tier_stays_within_five_percent_of_current() -> None:
+    # Given a pig and scripted normal-tier weight rolls at both bounds
+    pig = make_pig(weight_kg=5.0)
+    lower = ScriptedRng(
+        randoms=[0.3, 0.0],  # one field; normal tier
+        choices=[0],  # the weight field
+        uniforms=[0.95],
+    )
+    upper = ScriptedRng(
+        randoms=[0.3, 0.0],
+        choices=[0],
+        uniforms=[1.05],
+    )
 
-    # When many change sets are sampled
-    # Then every value follows the daily-rule magnitudes
-    for _ in range(2000):
-        for change in roll_stat_changes(rng):
-            if change.key == "weight_kg":
-                assert 0.01 <= change.value <= 1.0
-            elif change.key == "mood":
-                assert -5 <= change.value <= 5
-            elif change.key == "health":
-                assert -3 <= change.value <= 3
-            else:
-                assert 0 <= change.value <= 100
+    # When the deltas are sampled
+    # Then they stay within ±5% of the current weight
+    assert roll_stat_changes(pig, lower)[0].delta == pytest.approx(-0.25)
+    assert roll_stat_changes(pig, upper)[0].delta == pytest.approx(0.25)
+
+
+def test_minor_tier_offsets_land_between_five_and_twenty_percent() -> None:
+    # Given a pig and scripted minor-tier mood rolls at both bounds and signs
+    pig = make_pig(mood=50)
+    lower = ScriptedRng(
+        randoms=[0.3, 0.8],  # one field; minor tier
+        choices=[2, -1],  # the mood field; negative sign
+        uniforms=[0.05],
+    )
+    upper = ScriptedRng(
+        randoms=[0.3, 0.8],
+        choices=[2, 1],
+        uniforms=[0.20],
+    )
+
+    # When the deltas are sampled
+    # Then they land between 5% and 20% of the current mood
+    assert roll_stat_changes(pig, lower)[0].delta == -2
+    assert roll_stat_changes(pig, upper)[0].delta == 10
+
+
+def test_major_tier_offsets_land_between_twenty_and_fifty_percent() -> None:
+    # Given a pig and scripted major-tier mood rolls at both bounds
+    pig = make_pig(mood=50)
+    lower = ScriptedRng(
+        randoms=[0.3, 0.95],  # one field; major tier
+        choices=[2, 1],
+        uniforms=[0.20],
+    )
+    upper = ScriptedRng(
+        randoms=[0.3, 0.95],
+        choices=[2, 1],
+        uniforms=[0.50],
+    )
+
+    # When the deltas are sampled
+    # Then they land between 20% and 50% of the current mood
+    assert roll_stat_changes(pig, lower)[0].delta == 10
+    assert roll_stat_changes(pig, upper)[0].delta == 25
+
+
+def test_extreme_bounded_tier_respects_global_bounds() -> None:
+    # Given a pig and scripted extreme-tier health rolls on both sides
+    pig = make_pig(health=50)
+    lower = ScriptedRng(
+        randoms=[0.3, 0.99],  # one field; extreme tier
+        choices=[1],  # the health field
+        uniforms=[25.0, 12.0],  # lower span pick; value 12
+    )
+    upper = ScriptedRng(
+        randoms=[0.3, 0.99],
+        choices=[1],
+        uniforms=[40.0, 90.0],  # upper span pick; value 90
+    )
+
+    # When the deltas are sampled
+    # Then both stay at least 50% away from the current health
+    assert roll_stat_changes(pig, lower)[0].delta == -38
+    assert roll_stat_changes(pig, upper)[0].delta == 40
+
+
+def test_extreme_weight_has_no_upper_limit() -> None:
+    # Given a pig and a scripted positive-side extreme weight roll
+    pig = make_pig(weight_kg=5.0)
+    rng = ScriptedRng(
+        randoms=[0.3, 0.99],  # one field; extreme tier
+        choices=[0, 1],  # the weight field; positive sign
+        expovariates=[1000.0],
+    )
+
+    # When the delta is sampled
+    # Then the unbounded weight follows the full exponential tail
+    assert roll_stat_changes(pig, rng)[0].delta == pytest.approx(5002.5)
 
 
 def test_apply_stat_changes_updates_only_targeted_fields() -> None:
-    # Given a pig and a mixed offset/reroll change set
-    pig = make_pig(mood=50, health=50, weight_kg=5.0)
+    # Given a pig and a mixed delta set
+    pig = make_pig(mood=50, health=50, weight_kg=5.0, energy=80)
     occurred_at = datetime(2026, 8, 14, 15, 0, tzinfo=DAY_TZ)
     changes = (
-        StatChange(key="weight_kg", kind="offset", value=0.53),
-        StatChange(key="mood", kind="offset", value=-5),
-        StatChange(key="energy", kind="reroll", value=42),
+        StatChange(key="weight_kg", delta=0.53),
+        StatChange(key="mood", delta=-5),
+        StatChange(key="energy", delta=-38),
     )
 
     # When the changes are applied
@@ -187,12 +264,12 @@ def test_apply_stat_changes_updates_only_targeted_fields() -> None:
 
 
 def test_apply_stat_changes_clamps_to_model_bounds() -> None:
-    # Given a pig near the bounds and extreme offsets
+    # Given a pig near the bounds and extreme deltas
     pig = make_pig(mood=97, health=2)
     occurred_at = datetime(2026, 8, 14, 15, 0, tzinfo=DAY_TZ)
     changes = (
-        StatChange(key="mood", kind="offset", value=5),
-        StatChange(key="health", kind="offset", value=-3),
+        StatChange(key="mood", delta=5),
+        StatChange(key="health", delta=-3),
     )
 
     # When the changes are applied
@@ -201,6 +278,24 @@ def test_apply_stat_changes_clamps_to_model_bounds() -> None:
     # Then both fields clamp to the model bounds
     assert updated.mood == 100
     assert updated.health == 0
+
+
+def test_repeated_sampled_changes_stay_within_model_bounds() -> None:
+    # Given a pig and a deterministic seeded random source
+    rng = random.Random(9)
+    pig = make_pig()
+    occurred_at = datetime(2026, 8, 14, 15, 0, tzinfo=DAY_TZ)
+
+    # When many sampled change sets are applied sequentially
+    # Then every intermediate pig satisfies the strict model bounds
+    current = pig
+    for _ in range(2000):
+        changes = roll_stat_changes(current, rng)
+        current = apply_stat_changes(current, changes, occurred_at)
+        assert current.weight_kg > 0
+        assert 0 <= current.mood <= 100
+        assert 0 <= current.health <= 100
+        assert 0 <= current.energy <= 100
 
 
 def test_pick_unexpected_moment_stays_in_today_window() -> None:

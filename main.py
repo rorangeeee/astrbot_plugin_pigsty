@@ -297,16 +297,16 @@ class PigstyPlugin(Star):
 
     @staticmethod
     def _render_stat_changes(changes: tuple[StatChange, ...]) -> str:
-        """Render one event's stat changes with Chinese labels."""
+        """Render one event's stat deltas with Chinese labels."""
         parts: list[str] = []
         for change in changes:
             label = STAT_LABELS[change.key]
             if change.key == "weight_kg":
-                parts.append(f"{label} +{change.value:.2f}kg")
+                parts.append(f"{label} {change.delta:+.2f}kg")
             elif change.key == "energy":
-                parts.append(f"精力 {change.value}")
+                parts.append(f"精力 {change.delta:+d}")
             else:
-                parts.append(f"{label} {change.value:+d}")
+                parts.append(f"{label} {change.delta:+d}")
         return "，".join(parts)
 
     @staticmethod

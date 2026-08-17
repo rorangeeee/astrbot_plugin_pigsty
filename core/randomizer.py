@@ -130,10 +130,11 @@ def default_random_source() -> random.Random:
 def roll_initial_stats(rng: RandomSource | None = None) -> InitialStatsRoll:
     """Roll every newborn stat independently through the offset tiers."""
     source = rng if rng is not None else default_random_source()
-    return InitialStatsRoll(tuple(_roll_stat(spec, source) for spec in STAT_SPECS))
+    return InitialStatsRoll(tuple(roll_stat(spec, source) for spec in STAT_SPECS))
 
 
-def _roll_stat(spec: StatSpec, rng: RandomSource) -> RolledStat:
+def roll_stat(spec: StatSpec, rng: RandomSource) -> RolledStat:
+    """Roll one stat value through the offset tiers."""
     tier = _pick_tier(rng)
     raw_value = _roll_value(spec, tier, rng)
     return RolledStat(key=spec.key, value=_finalize(spec, raw_value), tier=tier)
