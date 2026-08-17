@@ -37,6 +37,18 @@ from .service import (
     DuplicateMemberPigError,
     PigCreation,
     PigstyService,
+    UnexpectedOutcome,
+    UnexpectedPigNotFoundError,
+)
+from .unexpected import (
+    StatChange,
+    UnexpectedRoll,
+    already_rolled_today,
+    apply_stat_changes,
+    next_chance,
+    pick_unexpected_moment,
+    roll_stat_changes,
+    roll_unexpected_for_pig,
 )
 
 __all__ = [
@@ -59,14 +71,24 @@ __all__ = [
     "RollTier",
     "RolledStat",
     "SessionIdentity",
+    "StatChange",
+    "UnexpectedOutcome",
+    "UnexpectedPigNotFoundError",
+    "UnexpectedRoll",
+    "already_rolled_today",
+    "apply_stat_changes",
     "daily_tick_reached",
     "default_random_source",
     "evolve_document",
     "evolve_pig_days",
     "is_due",
     "missed_day_count",
+    "next_chance",
     "next_tick_at",
+    "pick_unexpected_moment",
     "resolve_session_identity",
     "roll_initial_stats",
+    "roll_stat_changes",
+    "roll_unexpected_for_pig",
     "utc_now",
 ]

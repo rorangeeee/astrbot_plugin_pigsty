@@ -1,15 +1,31 @@
 """Test-only AstrBot plugin lifecycle types."""
 
+import logging
 import os
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+from .event import MessageChain
+from .provider import Provider
+
 PluginT = TypeVar("PluginT")
 
 
 class Context:
-    """Minimal plugin context."""
+    """Minimal plugin context with LLM and proactive-send surfaces."""
+
+    def __init__(self) -> None:
+        self.sent_messages: list[tuple[str, MessageChain]] = []
+        self.provider: Provider | None = None
+
+    async def get_using_provider_async(self, umo: str | None = None) -> Provider | None:
+        """Return the canned provider, if any."""
+        return self.provider
+
+    async def send_message(self, umo: str, chain: MessageChain) -> None:
+        """Record the proactive message for smoke tests."""
+        self.sent_messages.append((umo, chain))
 
 
 class Star:
@@ -17,6 +33,7 @@ class Star:
 
     def __init__(self, context: Context) -> None:
         self.context: Context = context
+        self.logger: logging.Logger = logging.getLogger("pigsty-test")
 
     async def terminate(self) -> None:
         """Provide the lifecycle method expected by the plugin adapter."""

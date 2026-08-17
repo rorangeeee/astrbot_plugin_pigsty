@@ -1,8 +1,12 @@
 """Test-only AstrBot event and command decorator."""
 
-from collections.abc import Callable
+from __future__ import annotations
+
 from dataclasses import dataclass
-from typing import ParamSpec, TypeVar
+from typing import TYPE_CHECKING, ParamSpec, TypeVar
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 Parameters = ParamSpec("Parameters")
 ReturnT = TypeVar("ReturnT")
@@ -13,6 +17,18 @@ class MessageEventResult:
     """Minimal message result exposed through AstrBot's public event API."""
 
     text: str
+
+
+class MessageChain:
+    """Minimal message chain builder for proactive sends."""
+
+    def __init__(self) -> None:
+        self.parts: list[str] = []
+
+    def message(self, text: str) -> MessageChain:
+        """Append one plain-text part and return the chain for chaining."""
+        self.parts.append(text)
+        return self
 
 
 class AstrMessageEvent:

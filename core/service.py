@@ -5,12 +5,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from typing_extensions import override
 
 from .evolution import evolve_document, is_due
-from .models import Pig, PigstyDocument, utc_now
+from .models import (
+    UNEXPECTED_EVENT_CATEGORY,
+    Pig,
+    PigEvent,
+    PigstyDocument,
+    utc_now,
+)
 from .randomizer import (
     InitialStatsRoll,
     RandomSource,
@@ -18,12 +24,16 @@ from .randomizer import (
     roll_initial_stats,
 )
 from .repository import PigstyDataError
+from .unexpected import (
+    StatChange,
+    apply_stat_changes,
+    roll_unexpected_for_pig,
+)
 
 if TYPE_CHECKING:
     from datetime import datetime
 
     from .identity import SessionIdentity
-    from .models import PigEvent
     from .repository import JsonPigstyRepository
 
 
@@ -81,6 +91,48 @@ def _evolve_document_mutation(
     stats[0] += sum(1 for pig in document.pigs if is_due(pig, now))
     stats[1] += len(evolved.events) - len(document.events)
     return evolved
+
+
+@dataclass(frozen=True, slots=True)
+class UnexpectedOutcome:
+    """One triggered unexpected-event draft waiting for a description."""
+
+    identity: SessionIdentity
+    pig: Pig
+    changes: tuple[StatChange, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class UnexpectedPigNotFoundError(Exception):
+    """Raised when an unexpected event targets a pig that no longer exists."""
+
+    pig_id: UUID
+
+    @override
+    def __str__(self) -> str:
+        return f"unexpected event target {self.pig_id} does not exist"
+
+
+def _roll_unexpected_mutation(
+    document: PigstyDocument,
+    now: datetime,
+    rng: RandomSource,
+    outcomes: list[UnexpectedOutcome],
+) -> PigstyDocument:
+    """Roll every due pig's unexpected dice and collect triggered drafts."""
+    new_pigs: list[Pig] = []
+    for pig in document.pigs:
+        roll = roll_unexpected_for_pig(pig, now, rng)
+        new_pigs.append(roll.pig)
+        if roll.triggered:
+            outcomes.append(
+                UnexpectedOutcome(
+                    identity=document.to_identity(),
+                    pig=roll.pig,
+                    changes=roll.changes,
+                )
+            )
+    return document.model_copy(update={"pigs": tuple(new_pigs)})
 
 
 class PigstyService:
@@ -212,3 +264,61 @@ class PigstyService:
             skipped_documents=skipped_documents,
             failed_documents=failed_documents,
         )
+
+    async def roll_unexpected_all(
+        self,
+        now: datetime,
+        rng: RandomSource | None = None,
+    ) -> tuple[UnexpectedOutcome, ...]:
+        """Roll every due pig's unexpected dice and return triggered drafts."""
+        source = rng if rng is not None else default_random_source()
+        outcomes: list[UnexpectedOutcome] = []
+        paths = await self._repository.document_paths()
+        for path in paths:
+            box: list[UnexpectedOutcome] = []
+            mutation = partial(
+                _roll_unexpected_mutation,
+                now=now,
+                rng=source,
+                outcomes=box,
+            )
+            try:
+                _ = await self._repository.update_path(path, mutation)
+            except (FileNotFoundError, PigstyDataError):
+                continue
+            outcomes.extend(box)
+        return tuple(outcomes)
+
+    async def apply_unexpected_event(
+        self,
+        identity: SessionIdentity,
+        pig_id: UUID,
+        changes: tuple[StatChange, ...],
+        description: str,
+        occurred_at: datetime,
+    ) -> Pig:
+        """Apply one unexpected event's stat changes and record it."""
+
+        def mutation(document: PigstyDocument) -> PigstyDocument:
+            pigs = list(document.pigs)
+            for index, existing in enumerate(pigs):
+                if existing.pig_id != pig_id:
+                    continue
+                updated = apply_stat_changes(existing, changes, occurred_at)
+                event = PigEvent(
+                    category=UNEXPECTED_EVENT_CATEGORY,
+                    pig_id=pig_id,
+                    occurred_at=occurred_at,
+                    description=description,
+                )
+                pigs[index] = updated
+                return document.model_copy(
+                    update={
+                        "pigs": tuple(pigs),
+                        "events": (*document.events, event),
+                    }
+                )
+            raise UnexpectedPigNotFoundError(pig_id)
+
+        document = await self._repository.update(identity, mutation)
+        return next(pig for pig in document.pigs if pig.pig_id == pig_id)

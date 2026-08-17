@@ -295,7 +295,7 @@ async def assert_random_stat_markers() -> None:
 async def assert_diary_and_daily_tick() -> None:
     from datetime import timedelta
 
-    from astrbot_plugin_pigsty.core.models import PigEvent, utc_now
+    from astrbot_plugin_pigsty.core.models import utc_now
 
     identity = resolve_session_identity(
         PigstyScope.GROUP,
@@ -321,6 +321,18 @@ async def assert_diary_and_daily_tick() -> None:
     assert empty_results[0].text == "你的猪圈还没有值得记录的事件。"
 
     future = utc_now() + timedelta(days=2)
+
+    # Guard every pig against unexpected rolls so the first ticks stay deterministic
+    guarded = document.model_copy(
+        update={
+            "pigs": tuple(
+                pig.model_copy(update={"unexpected_last_rolled_at": future})
+                for pig in document.pigs
+            )
+        }
+    )
+    await plugin.repository.save(guarded)
+
     summary = await plugin._run_daily_tick(future)
     assert summary.evolved_pigs == pig_count
     assert summary.recorded_events == pig_count
@@ -333,18 +345,67 @@ async def assert_diary_and_daily_tick() -> None:
     diary_results = await collect(owner_event, "diary")
     assert diary_results[0].text == "你的猪圈还没有值得记录的事件。"
 
-    notable = PigEvent(
-        category="unexpected_events",
-        pig_id=document.pigs[0].pig_id,
-        occurred_at=utc_now(),
-        description="测试事件\uff1a捡到彩票",
+    # Arm exactly one pig with a guaranteed unexpected-event trigger
+    current = await plugin.repository.load(identity)
+    target_pig = current.pigs[0]
+    armed = current.model_copy(
+        update={
+            "pigs": tuple(
+                pig.model_copy(
+                    update={
+                        "unexpected_chance_percent": 100,
+                        "unexpected_last_rolled_at": None,
+                    }
+                )
+                if pig.pig_id == target_pig.pig_id
+                else pig
+                for pig in current.pigs
+            )
+        }
     )
-    updated_document = await plugin.repository.load(identity)
-    await plugin.repository.save(
-        updated_document.model_copy(
-            update={"events": (*updated_document.events, notable)}
-        )
-    )
+    await plugin.repository.save(armed)
+
+    class FakeLlm:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return "捡到了一张彩票"
+
+    class FakePusher:
+        def __init__(self) -> None:
+            self.sent: list[tuple[str, str]] = []
+
+        async def push(self, unified_origin: str, text: str) -> None:
+            self.sent.append((unified_origin, text))
+
+    fake_llm = FakeLlm()
+    fake_pusher = FakePusher()
+    plugin._llm = fake_llm
+    plugin._pusher = fake_pusher
+
+    after = await plugin._run_daily_tick(future)
+    assert after.evolved_pigs == 0
+
+    assert len(fake_llm.prompts) == 1
+    assert "\u6570\u503c\u53d8\u5316" in fake_llm.prompts[0]
+    assert target_pig.name in fake_llm.prompts[0]
+
+    events = await plugin.service.list_events(identity)
+    unexpected_events = [
+        event for event in events if event.category == "unexpected_events"
+    ]
+    assert len(unexpected_events) == 1
+    assert unexpected_events[0].pig_id == target_pig.pig_id
+    assert unexpected_events[0].description == "捡到了一张彩票"
+
+    await plugin._send_due_pushes(future + timedelta(days=1))
+    assert len(fake_pusher.sent) == 1
+    push_text = fake_pusher.sent[0][1]
+    assert "\u7a81\u53d1\u4e8b\u4ef6" in push_text
+    assert "捡到了一张彩票" in push_text
+    assert "1. " in push_text
 
     diary_results = await collect(owner_event, "diary")
     diary_text = diary_results[0].text

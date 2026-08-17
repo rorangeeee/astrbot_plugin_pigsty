@@ -7,6 +7,9 @@ _MessageComponent = object
 
 class MessageEventResult: ...
 
+class MessageChain:
+    def message(self, text: str) -> MessageChain: ...
+
 class AstrMessageEvent:
     message_str: str
 

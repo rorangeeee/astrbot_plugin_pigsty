@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 import random
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, TypeVar
+from uuid import uuid4
 
 import anyio
 import pytest
@@ -13,7 +14,9 @@ from core.service import (
     DuplicateMemberPigError,
     PigPositionNotFoundError,
     PigstyService,
+    UnexpectedPigNotFoundError,
 )
+from core.unexpected import StatChange
 from tests.conftest import ScriptedRng
 
 if TYPE_CHECKING:
@@ -361,5 +364,124 @@ def test_evolve_all_due_tolerates_corrupt_documents(tmp_path: Path) -> None:
         assert summary.evolved_pigs == 1
         pigs = await service.list_pigs(identity)
         assert pigs[0].age_days == valid.age_days + 1
+
+    run_async(scenario)
+
+
+def test_roll_unexpected_all_collects_triggered_drafts(tmp_path: Path) -> None:
+    # Given two pigs, one armed with a guaranteed trigger and one already rolled
+    repo = JsonPigstyRepository(tmp_path)
+    service = PigstyService(repo)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        first = (await service.add_random(identity)).pig
+        second = (await service.add_random(identity)).pig
+        now = first.last_state_update_at + timedelta(days=1)
+        document = await repo.load(identity)
+        prepared = document.model_copy(
+            update={
+                "pigs": (
+                    document.pigs[0].model_copy(
+                        update={"unexpected_chance_percent": 100}
+                    ),
+                    document.pigs[1].model_copy(
+                        update={"unexpected_last_rolled_at": now}
+                    ),
+                )
+            }
+        )
+        await repo.save(prepared)
+
+        # When every pig rolls with a scripted mood-event draw
+        rng = ScriptedRng(randoms=[0.5, 0.3], choices=[1], uniforms=[-2.0])
+        outcomes = await service.roll_unexpected_all(now, rng)
+
+        # Then only the armed pig triggers and its pity state resets
+        assert len(outcomes) == 1
+        outcome = outcomes[0]
+        assert outcome.pig.pig_id == first.pig_id
+        assert tuple(change.key for change in outcome.changes) == ("mood",)
+        assert outcome.changes[0].value == -2
+        reloaded = await repo.load(identity)
+        assert reloaded.pigs[0].unexpected_chance_percent == 20
+        assert reloaded.pigs[0].unexpected_last_rolled_at == now
+        assert (
+            reloaded.pigs[1].unexpected_chance_percent
+            == second.unexpected_chance_percent
+        )
+
+        # And a second roll the same day finds nothing to roll
+        repeated = await service.roll_unexpected_all(now, ScriptedRng())
+        assert repeated == ()
+
+    run_async(scenario)
+
+
+def test_roll_unexpected_all_skips_empty_repositories(tmp_path: Path) -> None:
+    # Given a repository without any persisted documents
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    now = datetime(2026, 8, 14, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    async def scenario() -> None:
+        # When the unexpected dice roll
+        outcomes = await service.roll_unexpected_all(now, ScriptedRng())
+
+        # Then nothing is created and nothing triggers
+        assert outcomes == ()
+        assert await service._repository.document_paths() == ()
+
+    run_async(scenario)
+
+
+def test_apply_unexpected_event_updates_pig_and_records_event(tmp_path: Path) -> None:
+    # Given one pig and a mixed offset/reroll change set
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        pig = (await service.add_random(identity)).pig
+        changes = (
+            StatChange(key="weight_kg", kind="offset", value=0.53),
+            StatChange(key="energy", kind="reroll", value=42),
+        )
+        occurred = pig.last_state_update_at + timedelta(hours=1)
+
+        # When the unexpected event is applied
+        updated = await service.apply_unexpected_event(
+            identity, pig.pig_id, changes, "摔了一跤", occurred
+        )
+
+        # Then only the targeted stats change and one event is recorded
+        assert updated.weight_kg == pytest.approx(pig.weight_kg + 0.53)
+        assert updated.energy == 42
+        assert updated.updated_at == occurred
+        assert updated.last_state_update_at == pig.last_state_update_at
+        events = await service.list_events(identity)
+        assert len(events) == 1
+        assert events[0].category == "unexpected_events"
+        assert events[0].pig_id == pig.pig_id
+        assert events[0].description == "摔了一跤"
+        assert events[0].occurred_at == occurred
+
+    run_async(scenario)
+
+
+def test_apply_unexpected_event_rejects_missing_pig(tmp_path: Path) -> None:
+    # Given an empty pigsty
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        # When an unexpected event targets an absent pig
+        # Then the typed error surfaces and nothing is written
+        with pytest.raises(UnexpectedPigNotFoundError):
+            _ = await service.apply_unexpected_event(
+                identity,
+                uuid4(),
+                (StatChange(key="mood", kind="offset", value=-1),),
+                "摔了一跤",
+                datetime(2026, 8, 14, 9, 0, tzinfo=timezone(timedelta(hours=8))),
+            )
 
     run_async(scenario)

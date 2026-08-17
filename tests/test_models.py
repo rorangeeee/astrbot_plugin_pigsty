@@ -23,6 +23,45 @@ def test_pig_uses_phase_one_defaults_and_generates_uuid() -> None:
     assert pig.created_at.tzinfo is UTC
     assert pig.updated_at.tzinfo is UTC
     assert pig.last_state_update_at.tzinfo is UTC
+    assert pig.unexpected_chance_percent == 20
+    assert pig.unexpected_last_rolled_at is None
+
+
+@pytest.mark.parametrize("chance", [19, 101])
+def test_pig_rejects_out_of_range_unexpected_chance(chance: int) -> None:
+    # Given an unexpected-event chance outside the pity ladder
+    # When the boundary model parses it
+    with pytest.raises(ValidationError):
+        _ = Pig(name="Lucky", unexpected_chance_percent=chance)
+
+    # Then the invalid chance is rejected
+
+
+def test_pig_normalizes_unexpected_roll_timestamp_to_utc() -> None:
+    # Given an aware roll timestamp in GMT+8
+    local_time = datetime(2026, 8, 14, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+
+    # When it crosses the Pig model boundary
+    pig = Pig(name="Lucky", unexpected_last_rolled_at=local_time)
+
+    # Then it is stored as UTC without changing the instant
+    assert pig.unexpected_last_rolled_at is not None
+    assert pig.unexpected_last_rolled_at.hour == 1
+    assert pig.unexpected_last_rolled_at.tzinfo is UTC
+
+
+def test_legacy_pig_json_without_unexpected_fields_parses() -> None:
+    # Given minimal legacy pig data written before the unexpected-event fields
+    raw = Pig(name="Lucky").model_dump()
+    del raw["unexpected_chance_percent"]
+    del raw["unexpected_last_rolled_at"]
+
+    # When the boundary model parses it
+    pig = Pig.model_validate(raw)
+
+    # Then the missing fields fall back to their defaults
+    assert pig.unexpected_chance_percent == 20
+    assert pig.unexpected_last_rolled_at is None
 
 
 def test_pig_allows_missing_member_association() -> None:

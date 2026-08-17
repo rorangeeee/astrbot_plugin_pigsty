@@ -8,10 +8,11 @@ from collections.abc import (
     AsyncIterator,  # noqa: TC003 - AstrBot evaluates command annotations at runtime.
 )
 from contextlib import suppress
-from typing import TYPE_CHECKING, Final
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Final, Protocol
 
 import anyio
-from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
+from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.message_components import At
 from astrbot.api.star import Star, StarTools, register
 from pydantic import ValidationError
@@ -25,12 +26,14 @@ from .core.identity import (
     resolve_session_identity,
 )
 from .core.models import REGULAR_EVENT_CATEGORY, utc_now
+from .core.randomizer import default_random_source
 from .core.repository import JsonPigstyRepository
 from .core.service import (
     DuplicateMemberPigError,
     PigPositionNotFoundError,
     PigstyService,
 )
+from .core.unexpected import pick_unexpected_moment
 
 if TYPE_CHECKING:
     from datetime import datetime
@@ -42,7 +45,8 @@ if TYPE_CHECKING:
 
     from .core.models import Pig, PigEvent
     from .core.randomizer import InitialStatsRoll
-    from .core.service import DailyTickSummary
+    from .core.service import DailyTickSummary, UnexpectedOutcome
+    from .core.unexpected import StatChange
 
 PLUGIN_NAME: Final = "astrbot_plugin_pigsty"
 ADD_USAGE: Final = "pig add [@用户] [名字]"
@@ -63,10 +67,86 @@ EVENT_CATEGORY_LABELS: Final = {
     "unexpected_events": "突发事件",
     "user_events": "用户事件",
 }
+UNEXPECTED_PROMPT_TEMPLATE: Final = (
+    "请根据以下信息为一只宠物小猪编写一条突发事件描述。\n"
+    "小猪名字：{name}\n"
+    "数值变化：{changes}\n"
+    "要求：仅输出事件描述本身（一句话，不超过50字），不要输出任何其他内容。"
+)
+UNEXPECTED_PUSH_TEMPLATE: Final = (
+    "⚠️ 突发事件：{position}. {name}\n{description}\n（数值变化：{changes}）"
+)
 
 
 class InvalidMemberTargetError(Exception):
     """Raised when a pig add command has an invalid mention target."""
+
+
+class LlmClient(Protocol):
+    """Seam for asking the default conversation LLM for a description."""
+
+    async def complete(self, prompt: str) -> str:
+        """Return the model's completion text for one prompt."""
+
+
+class PigstyPusher(Protocol):
+    """Seam for pushing proactive plain-text messages to one session."""
+
+    async def push(self, unified_origin: str, text: str) -> None:
+        """Send one plain-text message to the given session."""
+
+
+@dataclass(frozen=True, slots=True)
+class PendingPush:
+    """One proactive message scheduled for a future moment."""
+
+    unified_origin: str
+    text: str
+    due_at: datetime
+
+
+class AstrBotLlmClient:
+    """Ask AstrBot's default LLM without any persona or history."""
+
+    def __init__(self, context: Context, unified_origin: str) -> None:
+        """Bind the client to one session's unified message origin."""
+        self._context: Context = context
+        self._unified_origin: str = unified_origin
+
+    async def complete(self, prompt: str) -> str:
+        """Return the model's completion text, or an empty string on failure."""
+        try:
+            provider = await self._context.get_using_provider_async(
+                umo=self._unified_origin
+            )
+        except Exception:
+            return ""
+        if provider is None:
+            return ""
+        try:
+            response = await provider.text_chat(
+                prompt=prompt,
+                context=[],
+                system_prompt="",
+            )
+        except Exception:
+            return ""
+        return response.completion_text.strip()
+
+
+class AstrBotPusher:
+    """Push proactive plain-text messages through AstrBot."""
+
+    def __init__(self, context: Context) -> None:
+        """Bind the pusher to the plugin context."""
+        self._context: Context = context
+
+    async def push(self, unified_origin: str, text: str) -> None:
+        """Send one plain-text message; platform failures propagate."""
+        await self._context.send_message(
+            unified_origin,
+            MessageChain().message(text),
+        )
 
 
 @register(
@@ -79,32 +159,155 @@ class InvalidMemberTargetError(Exception):
 class PigstyPlugin(Star):
     """AstrBot lifecycle adapter for Pigsty's core services."""
 
-    def __init__(self, context: Context, config: AstrBotConfig | None = None) -> None:
-        """Initialize the plugin, its repository, and the daily tick task."""
+    def __init__(
+        self,
+        context: Context,
+        config: AstrBotConfig | None = None,
+        *,
+        llm: LlmClient | None = None,
+        pusher: PigstyPusher | None = None,
+    ) -> None:
+        """Initialize the plugin, its repository, seams, and the daily task."""
         super().__init__(context)
         self.scope: PigstyScope = self._read_scope(config)
         self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.repository: JsonPigstyRepository = JsonPigstyRepository(self.data_dir)
         self.service: PigstyService = PigstyService(self.repository)
+        self._llm: LlmClient | None = llm
+        self._pusher: PigstyPusher = (
+            pusher if pusher is not None else AstrBotPusher(context)
+        )
+        self._pending_pushes: list[PendingPush] = []
         self._last_tick_summary: DailyTickSummary | None = None
         self._tick_task: asyncio.Task[None] = asyncio.create_task(self._daily_loop())
 
     async def _daily_loop(self) -> None:
-        """Run the 9:00 GMT+8 daily evolution tick forever."""
+        """Run the 9:00 GMT+8 tick and deliver scheduled pushes forever."""
         while True:
             now = utc_now()
             if daily_tick_reached(now):
                 await self._run_daily_tick(now)
-            await anyio.sleep(
-                max((next_tick_at(utc_now()) - utc_now()).total_seconds(), 0.0)
-            )
+            await self._send_due_pushes(utc_now())
+            await anyio.sleep(self._seconds_until_next_wake(utc_now()))
+
+    def _seconds_until_next_wake(self, now: datetime) -> float:
+        """Return seconds until the next tick or scheduled push."""
+        target = next_tick_at(now)
+        if self._pending_pushes:
+            target = min(target, self._pending_pushes[0].due_at)
+        return max((target - now).total_seconds(), 0.0)
 
     async def _run_daily_tick(self, now: datetime) -> DailyTickSummary:
-        """Apply one real-time daily evolution pass and remember its outcome."""
+        """Evolve due pigs, roll unexpected events, and schedule their pushes."""
         summary = await self.service.evolve_all_due(now)
+        outcomes = await self.service.roll_unexpected_all(now)
+        for outcome in outcomes:
+            try:
+                await self._process_unexpected_outcome(outcome, now)
+            except Exception:
+                self.logger.exception("failed to process an unexpected event")
         self._last_tick_summary = summary
         return summary
+
+    async def _process_unexpected_outcome(
+        self,
+        outcome: UnexpectedOutcome,
+        now: datetime,
+    ) -> None:
+        """Describe, apply, record, and schedule one triggered event."""
+        name = outcome.pig.name
+        changes_text = self._render_stat_changes(outcome.changes)
+        prompt = UNEXPECTED_PROMPT_TEMPLATE.format(name=name, changes=changes_text)
+        description = await self._llm_complete(outcome.identity, prompt)
+        if not description:
+            description = f"数值变化：{changes_text}"
+        description = description[:200]
+        moment = pick_unexpected_moment(now, default_random_source())
+        await self.service.apply_unexpected_event(
+            outcome.identity,
+            outcome.pig.pig_id,
+            outcome.changes,
+            description,
+            moment,
+        )
+        pigs = await self.service.list_pigs(outcome.identity)
+        position = next(
+            (
+                index
+                for index, pig in enumerate(pigs, start=1)
+                if pig.pig_id == outcome.pig.pig_id
+            ),
+            0,
+        )
+        text = UNEXPECTED_PUSH_TEMPLATE.format(
+            position=position,
+            name=name,
+            description=description,
+            changes=changes_text,
+        )
+        self._schedule_push(
+            PendingPush(
+                unified_origin=self._unified_origin_for(outcome.identity),
+                text=text,
+                due_at=moment,
+            )
+        )
+
+    async def _llm_complete(self, identity: SessionIdentity, prompt: str) -> str:
+        """Ask the injected or AstrBot default LLM for a description."""
+        if self._llm is not None:
+            try:
+                return (await self._llm.complete(prompt)).strip()
+            except Exception:
+                self.logger.exception("unexpected description LLM failed")
+                return ""
+        return await AstrBotLlmClient(
+            self.context,
+            self._unified_origin_for(identity),
+        ).complete(prompt)
+
+    def _schedule_push(self, push: PendingPush) -> None:
+        """Queue one proactive message sorted by its due moment."""
+        self._pending_pushes.append(push)
+        self._pending_pushes.sort(key=lambda item: item.due_at)
+
+    async def _send_due_pushes(self, now: datetime) -> None:
+        """Send every queued push whose moment has arrived."""
+        due = [push for push in self._pending_pushes if push.due_at <= now]
+        self._pending_pushes = [
+            push for push in self._pending_pushes if push.due_at > now
+        ]
+        for push in due:
+            try:
+                await self._pusher.push(push.unified_origin, push.text)
+            except Exception:
+                self.logger.exception("failed to push an unexpected event message")
+
+    @staticmethod
+    def _unified_origin_for(identity: SessionIdentity) -> str:
+        """Build AstrBot's unified_msg_origin string for a pigsty context."""
+        if identity.group_id is not None:
+            message_type = "group_message"
+            session_id = identity.group_id
+        else:
+            message_type = "private_message"
+            session_id = identity.owner_user_id
+        return f"{identity.platform_id}:{message_type}:{session_id}"
+
+    @staticmethod
+    def _render_stat_changes(changes: tuple[StatChange, ...]) -> str:
+        """Render one event's stat changes with Chinese labels."""
+        parts: list[str] = []
+        for change in changes:
+            label = STAT_LABELS[change.key]
+            if change.key == "weight_kg":
+                parts.append(f"{label} +{change.value:.2f}kg")
+            elif change.key == "energy":
+                parts.append(f"精力 {change.value}")
+            else:
+                parts.append(f"{label} {change.value:+d}")
+        return "，".join(parts)
 
     @staticmethod
     def _read_scope(config: AstrBotConfig | None) -> PigstyScope:

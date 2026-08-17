@@ -70,6 +70,8 @@ class Pig(BaseModel):
     created_at: datetime = Field(default_factory=utc_now)
     updated_at: datetime = Field(default_factory=utc_now)
     last_state_update_at: datetime = Field(default_factory=utc_now)
+    unexpected_chance_percent: int = Field(default=20, ge=20, le=100)
+    unexpected_last_rolled_at: datetime | None = Field(default=None)
 
     @field_validator("member_platform_id", "member_user_id")
     @classmethod
@@ -117,11 +119,14 @@ class Pig(BaseModel):
         "created_at",
         "updated_at",
         "last_state_update_at",
+        "unexpected_last_rolled_at",
         mode="after",
     )
     @classmethod
-    def normalize_timestamp(cls, value: datetime) -> datetime:
+    def normalize_timestamp(cls, value: datetime | None) -> datetime | None:
         """Require timezone-aware timestamps and store them in UTC."""
+        if value is None:
+            return None
         return _normalize_utc_timestamp(value)
 
 

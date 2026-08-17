@@ -79,6 +79,7 @@ unfixable = []
 "main.py" = [
     "A004",   # AstrBot exposes its decorator namespace as `filter`.
     "RUF001", # Chinese messages intentionally use fullwidth punctuation.
+    "BLE001", # Adapter seams wrap third-party LLM and platform push calls.
 ]
 "tests/fake_runtime/astrbot/api/event.py" = [
     "A001", # The fake runtime mirrors AstrBot's `filter` binding.

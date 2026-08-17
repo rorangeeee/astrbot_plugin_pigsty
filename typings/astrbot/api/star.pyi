@@ -1,8 +1,15 @@
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from pathlib import Path
 from typing import TypeVar
 
-class Context: ...
+from .event import MessageChain
+from .provider import Provider
+
+class Context:
+    def get_using_provider_async(
+        self, umo: str | None = None
+    ) -> Awaitable[Provider | None]: ...
+    def send_message(self, umo: str, chain: MessageChain) -> Awaitable[None]: ...
 
 class Star:
     def __init__(self, context: Context) -> None: ...
