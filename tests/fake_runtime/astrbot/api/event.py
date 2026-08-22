@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, ParamSpec, TypeVar
 
 if TYPE_CHECKING:
@@ -69,8 +70,18 @@ class AstrMessageEvent:
         return MessageEventResult(text)
 
 
+class EventMessageType(StrEnum):
+    """Mirror of AstrBot's public message-type filter values."""
+
+    ALL = "all"
+    GROUP = "group"
+    PRIVATE = "private"
+
+
 class filter:
-    """Minimal command decorator namespace."""
+    """Minimal command and message-listener decorator namespace."""
+
+    EventMessageType: type[EventMessageType] = EventMessageType
 
     @staticmethod
     def command(
@@ -80,6 +91,22 @@ class filter:
         Callable[Parameters, ReturnT],
     ]:
         """Preserve the decorated handler unchanged."""
+
+        def decorate(
+            handler: Callable[Parameters, ReturnT],
+        ) -> Callable[Parameters, ReturnT]:
+            return handler
+
+        return decorate
+
+    @staticmethod
+    def event_message_type(
+        _message_type: EventMessageType,
+    ) -> Callable[
+        [Callable[Parameters, ReturnT]],
+        Callable[Parameters, ReturnT],
+    ]:
+        """Preserve the decorated message listener unchanged."""
 
         def decorate(
             handler: Callable[Parameters, ReturnT],

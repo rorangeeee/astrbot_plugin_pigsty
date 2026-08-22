@@ -25,6 +25,12 @@ from .core.identity import (
     SessionIdentity,
     resolve_session_identity,
 )
+from .core.interaction import (
+    build_interaction_classification_prompt,
+    build_interaction_conversion_prompt,
+    parse_intent_response,
+    parse_user_interaction_plan,
+)
 from .core.models import REGULAR_EVENT_CATEGORY, utc_now
 from .core.randomizer import default_random_source
 from .core.repository import JsonPigstyRepository
@@ -32,6 +38,7 @@ from .core.service import (
     DuplicateMemberPigError,
     PigPositionNotFoundError,
     PigstyService,
+    UserInteractionPigNotFoundError,
 )
 from .core.unexpected import pick_unexpected_moment
 
@@ -43,6 +50,7 @@ if TYPE_CHECKING:
     from astrbot.api import AstrBotConfig
     from astrbot.api.star import Context
 
+    from .core.interaction import UserInteractionPlan
     from .core.models import Pig, PigEvent
     from .core.randomizer import InitialStatsRoll
     from .core.service import DailyTickSummary, UnexpectedOutcome
@@ -76,6 +84,7 @@ UNEXPECTED_PROMPT_TEMPLATE: Final = (
 UNEXPECTED_PUSH_TEMPLATE: Final = (
     "⚠️ 突发事件：{position}. {name}\n{description}\n（数值变化：{changes}）"
 )
+USER_INTERACTION_REPLY_LIMIT: Final = 500
 
 
 class InvalidMemberTargetError(Exception):
@@ -180,7 +189,15 @@ class PigstyPlugin(Star):
         )
         self._pending_pushes: list[PendingPush] = []
         self._last_tick_summary: DailyTickSummary | None = None
-        self._tick_task: asyncio.Task[None] = asyncio.create_task(self._daily_loop())
+        self._tick_task: asyncio.Task[None] | None = self._start_tick_task()
+
+    def _start_tick_task(self) -> asyncio.Task[None] | None:
+        """Start the background loop when an event loop is already running."""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return None
+        return loop.create_task(self._daily_loop())
 
     async def _daily_loop(self) -> None:
         """Run the 9:00 GMT+8 tick and deliver scheduled pushes forever."""
@@ -303,11 +320,112 @@ class PigstyPlugin(Star):
             label = STAT_LABELS[change.key]
             if change.key == "weight_kg":
                 parts.append(f"{label} {change.delta:+.2f}kg")
+            elif isinstance(change.delta, int) or (
+                isinstance(change.delta, float) and change.delta.is_integer()
+            ):
+                if change.key == "energy":
+                    parts.append(f"精力 {int(change.delta):+d}")
+                else:
+                    parts.append(f"{label} {int(change.delta):+d}")
             elif change.key == "energy":
-                parts.append(f"精力 {change.delta:+d}")
+                parts.append(f"精力 {change.delta:+.2f}")
             else:
-                parts.append(f"{label} {change.delta:+d}")
+                parts.append(f"{label} {change.delta:+.2f}")
         return "，".join(parts)
+
+    @filter.event_message_type(filter.EventMessageType.ALL)
+    async def on_pigsty_user_message(
+        self,
+        event: AstrMessageEvent,
+    ) -> AsyncIterator[MessageEventResult]:
+        """Classify free-form chat and apply LLM-derived pig interactions."""
+        reply = await self._handle_user_interaction(event)
+        if reply:
+            yield event.plain_result(reply)
+
+    async def _handle_user_interaction(  # noqa: C901, PLR0911
+        self,
+        event: AstrMessageEvent,
+    ) -> str | None:
+        """Return the user-visible reply when one message changes a pig."""
+        message = event.message_str.strip()
+        if not message or self._is_pig_command_message(message):
+            return None
+
+        identity = self._identity_for_event(event)
+        pigs = await self.service.list_pigs(identity)
+        if not pigs:
+            return None
+
+        classification = await self._llm_complete(
+            identity,
+            build_interaction_classification_prompt(pigs, message),
+        )
+        if not classification:
+            return None
+        involves_pigs = parse_intent_response(classification)
+        if involves_pigs is None:
+            self.logger.warning(
+                "pigsty LLM returned an invalid intent response: %s",
+                classification,
+            )
+            return None
+        if not involves_pigs:
+            return None
+
+        conversion = await self._llm_complete(
+            identity,
+            build_interaction_conversion_prompt(pigs, message),
+        )
+        if not conversion:
+            return None
+        plan = parse_user_interaction_plan(conversion)
+        if plan is None:
+            self.logger.warning(
+                "pigsty LLM returned an invalid interaction response: %s",
+                conversion,
+            )
+            return None
+        if not plan.interactions:
+            return plan.reply[:USER_INTERACTION_REPLY_LIMIT] or None
+
+        try:
+            updated = await self.service.apply_user_interaction(
+                identity,
+                plan.interactions,
+                utc_now(),
+            )
+        except UserInteractionPigNotFoundError:
+            self.logger.warning(
+                "pigsty LLM targeted a missing pig; ignoring the interaction"
+            )
+            return None
+        except Exception:
+            self.logger.exception("failed to apply a pigsty user interaction")
+            return None
+        return self._render_user_interaction_reply(plan, updated)
+
+    @staticmethod
+    def _is_pig_command_message(message: str) -> bool:
+        """Return whether a message is an explicit pig command invocation."""
+        text = message.strip()
+        if text.startswith("/"):
+            text = text[1:].strip()
+        return bool(text) and text.split(maxsplit=1)[0].lower() == "pig"
+
+    @staticmethod
+    def _render_user_interaction_reply(
+        plan: UserInteractionPlan,
+        pigs: tuple[Pig, ...],
+    ) -> str:
+        """Render the LLM reply, falling back to a stat-change summary."""
+        if plan.reply:
+            return plan.reply[:USER_INTERACTION_REPLY_LIMIT]
+        parts = [
+            f"{pig.name}：{PigstyPlugin._render_stat_changes(interaction.changes)}"
+            for pig, interaction in zip(pigs, plan.interactions, strict=True)
+        ]
+        return "已记录小猪互动：" + "；".join(parts)
 
     @staticmethod
     def _read_scope(config: AstrBotConfig | None) -> PigstyScope:

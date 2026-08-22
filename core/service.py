@@ -12,6 +12,7 @@ from typing_extensions import override
 from .evolution import evolve_document, is_due
 from .models import (
     UNEXPECTED_EVENT_CATEGORY,
+    USER_EVENT_CATEGORY,
     Pig,
     PigEvent,
     PigstyDocument,
@@ -34,6 +35,7 @@ if TYPE_CHECKING:
     from datetime import datetime
 
     from .identity import SessionIdentity
+    from .interaction import UserPigInteraction
     from .repository import JsonPigstyRepository
 
 
@@ -111,6 +113,28 @@ class UnexpectedPigNotFoundError(Exception):
     @override
     def __str__(self) -> str:
         return f"unexpected event target {self.pig_id} does not exist"
+
+
+@dataclass(frozen=True, slots=True)
+class UserInteractionPigNotFoundError(Exception):
+    """Raised when a user interaction targets an absent display position."""
+
+    position: int
+
+    @override
+    def __str__(self) -> str:
+        return f"user interaction target position {self.position} does not exist"
+
+
+@dataclass(frozen=True, slots=True)
+class DuplicateUserInteractionPositionError(Exception):
+    """Raised when one user interaction repeats a pig display position."""
+
+    position: int
+
+    @override
+    def __str__(self) -> str:
+        return f"user interaction repeats pig position {self.position}"
 
 
 def _roll_unexpected_mutation(
@@ -322,3 +346,45 @@ class PigstyService:
 
         document = await self._repository.update(identity, mutation)
         return next(pig for pig in document.pigs if pig.pig_id == pig_id)
+
+    async def apply_user_interaction(
+        self,
+        identity: SessionIdentity,
+        interactions: tuple[UserPigInteraction, ...],
+        occurred_at: datetime,
+    ) -> tuple[Pig, ...]:
+        """Apply LLM-derived user interactions and record one user event per pig."""
+        if not interactions:
+            return await self.list_pigs(identity)
+
+        def mutation(document: PigstyDocument) -> PigstyDocument:
+            pigs = list(document.pigs)
+            events = document.events
+            seen_positions: set[int] = set()
+            for interaction in interactions:
+                if interaction.position in seen_positions:
+                    raise DuplicateUserInteractionPositionError(interaction.position)
+                seen_positions.add(interaction.position)
+                index = interaction.position - 1
+                if index < 0 or index >= len(pigs):
+                    raise UserInteractionPigNotFoundError(interaction.position)
+                existing = pigs[index]
+                updated = apply_stat_changes(
+                    existing,
+                    interaction.changes,
+                    occurred_at,
+                )
+                event = PigEvent(
+                    category=USER_EVENT_CATEGORY,
+                    pig_id=existing.pig_id,
+                    occurred_at=occurred_at,
+                    description=interaction.description,
+                )
+                pigs[index] = updated
+                events = (*events, event)
+            return document.model_copy(update={"pigs": tuple(pigs), "events": events})
+
+        updated = await self._repository.update(identity, mutation)
+        return tuple(
+            updated.pigs[interaction.position - 1] for interaction in interactions
+        )

@@ -16,6 +16,14 @@ from .identity import (
     SessionIdentity,
     resolve_session_identity,
 )
+from .interaction import (
+    UserInteractionPlan,
+    UserPigInteraction,
+    build_interaction_classification_prompt,
+    build_interaction_conversion_prompt,
+    parse_intent_response,
+    parse_user_interaction_plan,
+)
 from .models import (
     CURRENT_SCHEMA_VERSION,
     REGULAR_EVENT_CATEGORY,
@@ -37,10 +45,12 @@ from .repository import JsonPigstyRepository, PigstyDataError
 from .service import (
     DailyTickSummary,
     DuplicateMemberPigError,
+    DuplicateUserInteractionPositionError,
     PigCreation,
     PigstyService,
     UnexpectedOutcome,
     UnexpectedPigNotFoundError,
+    UserInteractionPigNotFoundError,
 )
 from .unexpected import (
     StatChange,
@@ -60,6 +70,7 @@ __all__ = [
     "DailyTickSummary",
     "DayChanges",
     "DuplicateMemberPigError",
+    "DuplicateUserInteractionPositionError",
     "IdentityError",
     "InitialStatsRoll",
     "JsonPigstyRepository",
@@ -78,8 +89,13 @@ __all__ = [
     "UnexpectedOutcome",
     "UnexpectedPigNotFoundError",
     "UnexpectedRoll",
+    "UserInteractionPigNotFoundError",
+    "UserInteractionPlan",
+    "UserPigInteraction",
     "already_rolled_today",
     "apply_stat_changes",
+    "build_interaction_classification_prompt",
+    "build_interaction_conversion_prompt",
     "daily_tick_reached",
     "default_random_source",
     "evolve_document",
@@ -88,6 +104,8 @@ __all__ = [
     "missed_day_count",
     "next_chance",
     "next_tick_at",
+    "parse_intent_response",
+    "parse_user_interaction_plan",
     "pick_unexpected_moment",
     "resolve_session_identity",
     "roll_initial_stats",

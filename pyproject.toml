@@ -77,6 +77,9 @@ unfixable = []
 "core/evolution.py" = [
     "RUF001", # Event descriptions intentionally use fullwidth punctuation.
 ]
+"core/interaction.py" = [
+    "RUF001", # LLM prompts intentionally use fullwidth punctuation.
+]
 "main.py" = [
     "A004",   # AstrBot exposes its decorator namespace as `filter`.
     "RUF001", # Chinese messages intentionally use fullwidth punctuation.

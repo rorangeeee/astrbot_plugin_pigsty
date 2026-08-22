@@ -8,6 +8,7 @@ from uuid import uuid4
 import anyio
 import pytest
 from core.identity import PigstyScope, resolve_session_identity
+from core.interaction import UserPigInteraction
 from core.randomizer import roll_initial_stats
 from core.repository import JsonPigstyRepository
 from core.service import (
@@ -15,6 +16,7 @@ from core.service import (
     PigPositionNotFoundError,
     PigstyService,
     UnexpectedPigNotFoundError,
+    UserInteractionPigNotFoundError,
 )
 from core.unexpected import StatChange
 from tests.conftest import ScriptedRng
@@ -330,8 +332,8 @@ def test_evolve_all_due_skips_fresh_pigs(tmp_path: Path) -> None:
     async def scenario() -> None:
         pig = (await service.add_random(identity)).pig
 
-        # When a trigger runs one hour after creation
-        future = pig.last_state_update_at + timedelta(hours=1)
+        # When a trigger runs a moment after creation on the same day
+        future = pig.last_state_update_at + timedelta(seconds=1)
         summary = await service.evolve_all_due(future)
 
         # Then the same-day pig is not evolved
@@ -501,5 +503,89 @@ def test_apply_unexpected_event_rejects_missing_pig(tmp_path: Path) -> None:
                 "摔了一跤",
                 datetime(2026, 8, 14, 9, 0, tzinfo=timezone(timedelta(hours=8))),
             )
+
+    run_async(scenario)
+
+
+def test_apply_user_interaction_clamps_and_records_user_events(tmp_path: Path) -> None:
+    # Given one pig with deterministic normal-tier stats
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        pig = (
+            await service.add_random(
+                identity,
+                rng=ScriptedRng(
+                    randoms=[0.0, 0.0, 0.0, 0.0],
+                    uniforms=[1.0, 1.0, 1.0, 1.0],
+                ),
+            )
+        ).pig
+        interaction = UserPigInteraction(
+            position=1,
+            description="喂了太多零食",
+            changes=(
+                StatChange(key="weight_kg", delta=0.25),
+                StatChange(key="mood", delta=-200),
+            ),
+        )
+        occurred = pig.last_state_update_at + timedelta(minutes=5)
+
+        # When the LLM-derived interaction is applied
+        updated = await service.apply_user_interaction(
+            identity,
+            (interaction,),
+            occurred,
+        )
+
+        # Then the final values obey global bounds and one user event is recorded
+        assert len(updated) == 1
+        assert updated[0].weight_kg == pytest.approx(pig.weight_kg + 0.25)
+        assert updated[0].mood == 0
+        assert updated[0].updated_at == occurred
+        assert updated[0].last_state_update_at == pig.last_state_update_at
+        events = await service.list_events(identity)
+        assert len(events) == 1
+        assert events[0].category == "user_events"
+        assert events[0].pig_id == pig.pig_id
+        assert events[0].description == "喂了太多零食"
+        assert events[0].occurred_at == occurred
+
+    run_async(scenario)
+
+
+def test_apply_user_interaction_rejects_missing_position(tmp_path: Path) -> None:
+    # Given one pig
+    service = PigstyService(JsonPigstyRepository(tmp_path))
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        original = (
+            await service.add_random(
+                identity,
+                rng=ScriptedRng(
+                    randoms=[0.0, 0.0, 0.0, 0.0],
+                    uniforms=[1.0, 1.0, 1.0, 1.0],
+                ),
+            )
+        ).pig
+        interaction = UserPigInteraction(
+            position=2,
+            description="不存在的猪",
+            changes=(StatChange(key="mood", delta=1),),
+        )
+
+        # When the interaction targets a display position that does not exist
+        with pytest.raises(UserInteractionPigNotFoundError):
+            _ = await service.apply_user_interaction(
+                identity,
+                (interaction,),
+                original.last_state_update_at + timedelta(minutes=5),
+            )
+
+        # Then the original pig and empty event list are untouched
+        assert await service.list_pigs(identity) == (original,)
+        assert await service.list_events(identity) == ()
 
     run_async(scenario)

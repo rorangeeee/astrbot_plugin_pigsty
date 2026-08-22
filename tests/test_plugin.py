@@ -47,6 +47,7 @@ import os
 import inspect
 
 import anyio
+import pytest
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, MessageEventResult
@@ -224,10 +225,14 @@ async def assert_macro_commands() -> None:
     assert "你的猪圈共有 2 只小猪\uff1a" in after_invalid_results[0].text
 
     named_results = await collect(named_owner_event, "add")
-    assert named_results[0].text == "已添加独立小猪\uff1a白雪 小猪"
+    named_text = named_results[0].text.split("\uff08体质异变\uff1a", 1)[0]
+    assert named_text == "已添加独立小猪\uff1a白雪 小猪"
 
     named_target_results = await collect(named_target_event, "add")
-    assert named_target_results[0].text == (
+    named_target_text = named_target_results[0].text.split(
+        "\uff08体质异变\uff1a", 1
+    )[0]
+    assert named_target_text == (
         "已将用户 target-2 添加为小猪\uff1a花花 猪"
     )
 
@@ -322,20 +327,26 @@ async def assert_diary_and_daily_tick() -> None:
 
     future = utc_now() + timedelta(days=2)
 
-    # Guard every pig against unexpected rolls so the first ticks stay deterministic
-    guarded = document.model_copy(
-        update={
-            "pigs": tuple(
-                pig.model_copy(update={"unexpected_last_rolled_at": future})
-                for pig in document.pigs
-            )
-        }
-    )
-    await plugin.repository.save(guarded)
+    # Guard every pig in every document against unexpected rolls
+    paths = await plugin.repository.document_paths()
+    documents = []
+    for path in paths:
+        current = await plugin.repository._read_existing(path)
+        guarded = current.model_copy(
+            update={
+                "pigs": tuple(
+                    pig.model_copy(update={"unexpected_last_rolled_at": future})
+                    for pig in current.pigs
+                )
+            }
+        )
+        documents.append(guarded)
+        await plugin.repository.save(guarded)
 
+    all_pig_count = sum(len(current.pigs) for current in documents)
     summary = await plugin._run_daily_tick(future)
-    assert summary.evolved_pigs == pig_count
-    assert summary.recorded_events == pig_count
+    assert summary.evolved_pigs == all_pig_count
+    assert summary.recorded_events == all_pig_count
     assert summary.failed_documents == 0
 
     repeated = await plugin._run_daily_tick(future)
@@ -371,7 +382,7 @@ async def assert_diary_and_daily_tick() -> None:
 
         async def complete(self, prompt: str) -> str:
             self.prompts.append(prompt)
-            return "捡到了一张彩票"
+            return "捡到彩票"
 
     class FakePusher:
         def __init__(self) -> None:
@@ -398,13 +409,13 @@ async def assert_diary_and_daily_tick() -> None:
     ]
     assert len(unexpected_events) == 1
     assert unexpected_events[0].pig_id == target_pig.pig_id
-    assert unexpected_events[0].description == "捡到了一张彩票"
+    assert unexpected_events[0].description == "捡到彩票"
 
     await plugin._send_due_pushes(future + timedelta(days=1))
     assert len(fake_pusher.sent) == 1
     push_text = fake_pusher.sent[0][1]
     assert "\u7a81\u53d1\u4e8b\u4ef6" in push_text
-    assert "捡到了一张彩票" in push_text
+    assert "捡到彩票" in push_text
     assert "1. " in push_text
 
     diary_results = await collect(owner_event, "diary")
@@ -441,10 +452,85 @@ async def assert_diary_and_daily_tick() -> None:
     assert out_of_range_results[0].text == "用法\uff1apig diary [序号]"
 
 
+async def assert_llm_user_interaction() -> None:
+    identity = resolve_session_identity(
+        PigstyScope.GROUP,
+        "qq",
+        "owner-a",
+        "group-1",
+    )
+    before = await plugin.service.list_pigs(identity)
+    assert before
+
+    class ScriptedLlm:
+        def __init__(self) -> None:
+            self.responses = [
+                '{"involves_pigs": true}',
+                (
+                    '{"interactions": [{"pig_position": 1, '
+                    '"description": "喂了一碗玉米糊", '
+                    '"changes": {"weight_kg": 0.10, "mood": 5}}], '
+                    '"reply": "已经给小猪喂了一碗玉米糊。"}'
+                ),
+            ]
+            self.prompts: list[str] = []
+
+        async def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return self.responses.pop(0)
+
+    fake_llm = ScriptedLlm()
+    plugin._llm = fake_llm
+    message_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="给小猪喂一碗玉米糊",
+    )
+
+    reply = await plugin._handle_user_interaction(message_event)
+
+    assert reply == "已经给小猪喂了一碗玉米糊。"
+    assert len(fake_llm.prompts) == 2
+    assert "1. " in fake_llm.prompts[0]
+    assert "全局数值约束" in fake_llm.prompts[1]
+    assert "体重：{:.2f}kg".format(before[0].weight_kg) in fake_llm.prompts[1]
+
+    after = await plugin.service.list_pigs(identity)
+    assert after[0].weight_kg == pytest.approx(before[0].weight_kg + 0.10)
+    assert after[0].mood == min(before[0].mood + 5, 100)
+
+    events = await plugin.service.list_events(identity)
+    user_events = [event for event in events if event.category == "user_events"]
+    assert len(user_events) == 1
+    assert user_events[0].pig_id == before[0].pig_id
+    assert user_events[0].description == "喂了一碗玉米糊"
+
+    pig_command_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="pig status",
+    )
+    assert await plugin._handle_user_interaction(pig_command_event) is None
+
+    empty_llm = ScriptedLlm()
+    plugin._llm = empty_llm
+    empty_owner_message = AstrMessageEvent(
+        sender_id="empty-owner",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="喂小猪",
+    )
+    assert await plugin._handle_user_interaction(empty_owner_message) is None
+    assert empty_llm.prompts == []
+
+
 anyio.run(assert_status_result)
 anyio.run(assert_macro_commands)
 anyio.run(assert_random_stat_markers)
 anyio.run(assert_diary_and_daily_tick)
+anyio.run(assert_llm_user_interaction)
 """
 
     # When the plugin module is imported and initialized in a child process
