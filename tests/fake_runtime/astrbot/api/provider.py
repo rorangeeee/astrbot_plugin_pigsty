@@ -21,4 +21,6 @@ class Provider:
         system_prompt: str = "",
     ) -> LLMResponse:
         """Return the canned completion without touching the network."""
+        _ = (prompt, context, system_prompt)
         return LLMResponse(self._completion_text)
+

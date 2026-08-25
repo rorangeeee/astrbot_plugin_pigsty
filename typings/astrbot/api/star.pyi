@@ -6,9 +6,12 @@ from .event import MessageChain
 from .provider import Provider
 
 class Context:
+    providers: dict[str, Provider]
+    provider: Provider | None
     def get_using_provider_async(
         self, umo: str | None = None
     ) -> Awaitable[Provider | None]: ...
+    def get_provider_by_id(self, provider_id: str) -> Provider | None: ...
     def send_message(self, umo: str, chain: MessageChain) -> Awaitable[None]: ...
 
 class Star:

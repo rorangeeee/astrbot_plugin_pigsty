@@ -1,4 +1,11 @@
 {
+  "llm_provider_id": {
+    "type": "string",
+    "description": "建议使用快速稳定的大模型",
+    "_special": "select_provider",
+    "default": "",
+    "hint": "建议使用快速稳定的大模型"
+  },
   "pigsty_scope": {
     "type": "string",
     "description": "猪圈数据作用域",

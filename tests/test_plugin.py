@@ -4,7 +4,7 @@ import sys
 from pathlib import Path
 from typing import ClassVar
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 FAKE_RUNTIME = PROJECT_ROOT / "tests" / "fake_runtime"
@@ -19,11 +19,27 @@ class ScopeSchema(BaseModel):
     options: tuple[str, ...]
 
 
+class LlmProviderSchema(BaseModel):
+    """Typed boundary for the WebUI's dynamic provider selector."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(
+        frozen=True,
+        populate_by_name=True,
+    )
+
+    type_name: str = Field(alias="type")
+    description: str
+    special: str = Field(alias="_special")
+    default: str
+    hint: str
+
+
 class PluginSchema(BaseModel):
     """Typed boundary for the plugin WebUI schema."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
+    llm_provider_id: LlmProviderSchema
     pigsty_scope: ScopeSchema
 
 
@@ -137,7 +153,8 @@ async def assert_macro_commands() -> None:
     unknown_results = await collect(owner_event, "wat")
     assert unknown_results[0].text == (
         "用法\uff1apig status | pig add [@用户] [名字] | "
-        "pig rename <序号> <新名字> | pig diary [序号] | pig show"
+        "pig rename <序号> <新名字> | pig diary [序号] | "
+        "pig letgo [序号/id/昵称] | pig show"
     )
 
     empty_results = await collect(empty_owner_event, "show")
@@ -571,6 +588,21 @@ def test_scope_schema_defaults_to_global() -> None:
     # Then WebUI exposes only the approved values with global as the default
     assert scope.default == "global"
     assert scope.options == ("global", "group")
+
+
+def test_llm_schema_uses_astrbot_provider_selector() -> None:
+    # Given the plugin WebUI schema
+    raw = (PROJECT_ROOT / "_conf_schema.json").read_text(encoding="utf-8")
+
+    # When the default conversation-model setting is inspected
+    llm = PluginSchema.model_validate_json(raw).llm_provider_id
+
+    # Then AstrBot can populate it from configured provider/model entries
+    assert llm.type_name == "string"
+    assert llm.description == "建议使用快速稳定的大模型"
+    assert llm.special == "select_provider"
+    assert llm.default == ""
+    assert llm.hint == "建议使用快速稳定的大模型"
 
 
 def test_metadata_declares_required_plugin_contract() -> None:

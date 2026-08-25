@@ -18,10 +18,15 @@ class Context:
     def __init__(self) -> None:
         self.sent_messages: list[tuple[str, MessageChain]] = []
         self.provider: Provider | None = None
+        self.providers: dict[str, Provider] = {}
 
     async def get_using_provider_async(self, umo: str | None = None) -> Provider | None:
         """Return the canned provider, if any."""
         return self.provider
+
+    def get_provider_by_id(self, provider_id: str) -> Provider | None:
+        """Return a configured provider by its test id."""
+        return self.providers.get(provider_id)
 
     async def send_message(self, umo: str, chain: MessageChain) -> None:
         """Record the proactive message for smoke tests."""

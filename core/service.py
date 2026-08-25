@@ -31,6 +31,8 @@ from .unexpected import (
     roll_unexpected_for_pig,
 )
 
+PIG_ID_PREFIX_MIN_LENGTH = 8
+
 if TYPE_CHECKING:
     from datetime import datetime
 
@@ -60,6 +62,37 @@ class PigPositionNotFoundError(Exception):
     @override
     def __str__(self) -> str:
         return f"pig position {self.position} does not exist"
+
+
+@dataclass(frozen=True, slots=True)
+class PigTargetNotFoundError(Exception):
+    """Raised when a letgo selector does not identify a persisted pig."""
+
+    selector: str
+
+    @override
+    def __str__(self) -> str:
+        return f"pig target {self.selector!r} does not exist"
+
+
+@dataclass(frozen=True, slots=True)
+class PigTargetAmbiguousError(Exception):
+    """Raised when a nickname or id prefix matches multiple pigs."""
+
+    selector: str
+    matches: int
+
+    @override
+    def __str__(self) -> str:
+        return f"pig target {self.selector!r} matches {self.matches} pigs"
+
+
+@dataclass(frozen=True, slots=True)
+class LetgoResult:
+    """Snapshot returned after one pig and its event history are removed."""
+
+    pig: Pig
+    events: tuple[PigEvent, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -249,6 +282,85 @@ class PigstyService:
         """Return the persisted events for one owner in record order."""
         document = await self._repository.load(identity)
         return document.events
+
+    async def letgo_pig(
+        self,
+        identity: SessionIdentity,
+        selector: str,
+    ) -> LetgoResult:
+        """Remove one pig by position, UUID, unique prefix, or exact nickname."""
+        normalized_selector = selector.strip()
+        removed: list[LetgoResult] = []
+
+        def remove(document: PigstyDocument) -> PigstyDocument:
+            index, pig = self._locate_pig(document.pigs, normalized_selector)
+            events = tuple(
+                event for event in document.events if event.pig_id == pig.pig_id
+            )
+            removed.append(LetgoResult(pig=pig, events=events))
+            return document.model_copy(
+                update={
+                    "pigs": (*document.pigs[:index], *document.pigs[index + 1 :]),
+                    "events": tuple(
+                        event
+                        for event in document.events
+                        if event.pig_id != pig.pig_id
+                    ),
+                }
+            )
+
+        _ = await self._repository.update(identity, remove)
+        return removed[0]
+
+    @staticmethod
+    def _locate_pig(  # noqa: C901
+        pigs: tuple[Pig, ...],
+        selector: str,
+    ) -> tuple[int, Pig]:
+        if not selector:
+            raise PigTargetNotFoundError(selector)
+        try:
+            requested_id = UUID(selector)
+        except ValueError:
+            requested_id = None
+        if requested_id is not None:
+            exact = next(
+                (
+                    (index, pig)
+                    for index, pig in enumerate(pigs)
+                    if pig.pig_id == requested_id
+                ),
+                None,
+            )
+            if exact is not None:
+                return exact
+            raise PigTargetNotFoundError(selector)
+        if selector.isdecimal():
+            position = int(selector)
+            if 1 <= position <= len(pigs):
+                return position - 1, pigs[position - 1]
+            raise PigTargetNotFoundError(selector)
+        lowered = selector.lower()
+        if len(selector) >= PIG_ID_PREFIX_MIN_LENGTH and all(
+            character in "0123456789abcdef" for character in lowered
+        ):
+            matches = [
+                (index, pig)
+                for index, pig in enumerate(pigs)
+                if pig.pig_id.hex.startswith(lowered)
+            ]
+            if len(matches) > 1:
+                raise PigTargetAmbiguousError(selector, len(matches))
+            if matches:
+                return matches[0]
+        matches = [
+            (index, pig) for index, pig in enumerate(pigs) if pig.name == selector
+        ]
+        if len(matches) > 1:
+            raise PigTargetAmbiguousError(selector, len(matches))
+        if matches:
+            return matches[0]
+        raise PigTargetNotFoundError(selector)
 
     async def evolve_all_due(
         self,
