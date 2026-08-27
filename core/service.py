@@ -47,6 +47,7 @@ class DuplicateMemberPigError(Exception):
 
     platform_id: str
     user_id: str
+    pig_name: str | None = None
 
     @override
     def __str__(self) -> str:
@@ -220,13 +221,15 @@ class PigstyService:
         _ = await self._repository.update(identity, append_pig)
         return PigCreation(pig=pig, roll=roll)
 
-    async def add_member(
+    async def add_member(  # noqa: PLR0913
         self,
         identity: SessionIdentity,
         member_platform_id: str,
         member_user_id: str,
         name: str | None = None,
         rng: RandomSource | None = None,
+        *,
+        member_name: str | None = None,
     ) -> PigCreation:
         """Create and persist a member-linked pig with rolled initial stats."""
         pig_id = uuid4()
@@ -235,17 +238,19 @@ class PigstyService:
             pig_id=pig_id,
             member_platform_id=member_platform_id,
             member_user_id=member_user_id,
+            member_name=member_name,
             name=f"小猪-{pig_id.hex[:8]}" if name is None else name,
             **roll.values(),
         )
 
         def append_pig(document: PigstyDocument) -> PigstyDocument:
             member_pair = (member_platform_id, member_user_id)
-            if any(
-                (existing.member_platform_id, existing.member_user_id) == member_pair
-                for existing in document.pigs
-            ):
-                raise DuplicateMemberPigError(*member_pair)
+            for existing in document.pigs:
+                if (
+                    existing.member_platform_id,
+                    existing.member_user_id,
+                ) == member_pair:
+                    raise DuplicateMemberPigError(*member_pair, existing.name)
             return document.model_copy(update={"pigs": (*document.pigs, pig)})
 
         _ = await self._repository.update(identity, append_pig)

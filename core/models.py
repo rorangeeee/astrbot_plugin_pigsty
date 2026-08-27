@@ -60,6 +60,7 @@ class Pig(BaseModel):
     pig_id: UUID = Field(default_factory=uuid4)
     member_platform_id: str | None = Field(default=None, min_length=1)
     member_user_id: str | None = Field(default=None, min_length=1)
+    member_name: str | None = Field(default=None, min_length=1)
     name: str = Field(min_length=1, max_length=32)
     age_days: int = Field(default=0, ge=0)
     weight_kg: float = Field(default=5.0, gt=0)
@@ -73,7 +74,7 @@ class Pig(BaseModel):
     unexpected_chance_percent: int = Field(default=20, ge=20, le=100)
     unexpected_last_rolled_at: datetime | None = Field(default=None)
 
-    @field_validator("member_platform_id", "member_user_id")
+    @field_validator("member_platform_id", "member_user_id", "member_name")
     @classmethod
     def reject_blank_member_ids(
         cls,

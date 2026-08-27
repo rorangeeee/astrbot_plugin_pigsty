@@ -34,12 +34,25 @@ class LlmProviderSchema(BaseModel):
     hint: str
 
 
+class AdminIdsSchema(BaseModel):
+    """Typed boundary for configured administrator IDs."""
+
+    model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
+
+    type_name: str = Field(alias="type")
+    description: str
+    hint: str
+    default: list[str]
+    items: dict[str, str]
+
+
 class PluginSchema(BaseModel):
     """Typed boundary for the plugin WebUI schema."""
 
     model_config: ClassVar[ConfigDict] = ConfigDict(frozen=True)
 
     llm_provider_id: LlmProviderSchema
+    admin_ids: AdminIdsSchema
     pigsty_scope: ScopeSchema
 
 
@@ -76,7 +89,10 @@ from astrbot_plugin_pigsty.core.identity import (
 from astrbot_plugin_pigsty.main import PigstyPlugin
 
 inspect.signature(PigstyPlugin.pig_command, eval_str=True)
-plugin = PigstyPlugin(Context(), AstrBotConfig(pigsty_scope="group"))
+plugin = PigstyPlugin(
+    Context(),
+    AstrBotConfig(pigsty_scope="group", admin_ids=["owner-a"]),
+)
 assert issubclass(PigstyPlugin, Star)
 assert plugin.scope is PigstyScope.GROUP
 assert plugin.repository.data_dir == Path(os.environ["ASTRBOT_TEST_DATA_DIR"])
@@ -89,7 +105,7 @@ target_event = AstrMessageEvent(
     sender_id="owner-a",
     platform_id="qq",
     group_id="group-1",
-    messages=(At(qq="target-1"),),
+    messages=(At(qq="target-1", name="target-one"),),
 )
 empty_owner_event = AstrMessageEvent(
     sender_id="owner-b",
@@ -148,13 +164,19 @@ async def assert_status_result() -> None:
     assert len(results) == 1
     assert isinstance(results[0], MessageEventResult)
     assert results[0].text == "Pigsty 数据层已就绪\\n作用域\\uff1agroup"
+    denied = await collect(empty_owner_event, "status")
+    assert denied[0].text == "此命令仅限管理员使用。"
 
 async def assert_macro_commands() -> None:
     unknown_results = await collect(owner_event, "wat")
     assert unknown_results[0].text == (
-        "用法\uff1apig status | pig add [@用户] [名字] | "
-        "pig rename <序号> <新名字> | pig diary [序号] | "
-        "pig letgo [序号/id/昵称] | pig show"
+        "用法：\\n"
+        "pig status\\n"
+        "pig add [@用户] [名字]\\n"
+        "pig rename <序号> <新名字>\\n"
+        "pig diary [序号]\\n"
+        "pig letgo [序号/id/昵称]\\n"
+        "pig show"
     )
 
     empty_results = await collect(empty_owner_event, "show")
@@ -168,30 +190,48 @@ async def assert_macro_commands() -> None:
     )
 
     random_results = await collect(owner_event, "add")
-    assert random_results[0].text.startswith(
-        "已添加独立小猪\uff1a小猪-"
-    )
-    independent_text = random_results[0].text.removeprefix(
-        "已添加独立小猪\uff1a"
-    )
-    independent_name = independent_text.split("\uff08体质异变\uff1a", 1)[0]
+    assert random_results[0].text.startswith("成功添加小猪小猪-")
+    independent_name = random_results[0].text.splitlines()[0].removeprefix(
+        "成功添加小猪"
+    ).removesuffix("！")
 
     linked_results = await collect(target_event, "add")
-    assert linked_results[0].text.startswith(
-        "已将用户 target-1 添加为小猪\uff1a小猪-"
-    )
-    linked_text = linked_results[0].text.removeprefix(
-        "已将用户 target-1 添加为小猪\uff1a"
-    )
-    linked_name = linked_text.split("\uff08体质异变\uff1a", 1)[0]
+    assert linked_results[0].text.startswith("成功将@target-1 小猪-")
+    linked_name = linked_results[0].text.splitlines()[0].split(" ", 2)[1]
+    linked_name = linked_name.removesuffix("添加进猪圈！")
 
     numeric_results = await collect(numeric_target_event, "add")
-    assert numeric_results[0].text.startswith(
-        "已将用户 123456 添加为小猪\uff1a小猪-"
+    assert numeric_results[0].text.startswith("成功将@123456 小猪-")
+
+    long_nickname = "这是一个长度超过三十二字且不应成为小猪名称的群昵称" * 2
+    long_nickname_event = AstrMessageEvent(
+        sender_id="owner-long",
+        platform_id="qq",
+        group_id="group-1",
+        messages=(At(qq="long-target", name=long_nickname),),
+        message_str=f"pig add @{long_nickname}",
+    )
+    long_results = await collect(long_nickname_event, "add")
+    assert long_results[0].text.startswith("成功将@long-target 小猪-")
+    long_show = await collect(long_nickname_event, "show")
+    assert f"@{long_nickname}" in long_show[0].text
+    long_without_metadata_event = AstrMessageEvent(
+        sender_id="owner-long2",
+        platform_id="qq",
+        group_id="group-1",
+        messages=(At(qq="long-target2"),),
+        message_str=f"pig add {long_nickname}",
+    )
+    long_without_metadata_results = await collect(
+        long_without_metadata_event, "add"
+    )
+    assert long_without_metadata_results[0].text.startswith(
+        "成功将@long-target2 小猪-"
     )
 
     duplicate_results = await collect(target_event, "add")
-    assert duplicate_results[0].text == "该用户已经在你的猪圈中。"
+    assert duplicate_results[0].text.startswith("该小猪")
+    assert duplicate_results[0].text.endswith("已经在你的猪圈中。")
 
     for messages in (
         (At(qq="target-2"), At(qq="target-3")),
@@ -210,12 +250,14 @@ async def assert_macro_commands() -> None:
     shown_results = await collect(owner_event, "show")
     shown_lines = shown_results[0].text.splitlines()
     assert shown_lines[0] == "你的猪圈共有 2 只小猪\uff1a"
-    assert shown_lines[1].startswith(f"1. {independent_name}")
-    assert shown_lines[2].startswith(f"2. {linked_name}")
-    assert "独立小猪" in shown_lines[1]
-    assert "关联用户 target-1" in shown_lines[2]
-    for line in shown_lines[1:]:
-        assert all(label in line for label in ("体重", "健康", "心情", "体力"))
+    assert shown_lines[1] == f"1. {independent_name}"
+    assert shown_lines[2].startswith("体重：")
+    assert shown_lines[6].startswith(f"2. {linked_name} @target-one")
+    assert shown_lines[7].startswith("体重：")
+    assert all(
+        label in shown_lines[2] + shown_lines[3] + shown_lines[4] + shown_lines[5]
+        for label in ("体重", "健康", "心情", "体力")
+    )
 
     identity = resolve_session_identity(
         PigstyScope.GROUP,
@@ -239,22 +281,18 @@ async def assert_macro_commands() -> None:
     )
 
     after_invalid_results = await collect(owner_event, "show")
-    assert "你的猪圈共有 2 只小猪\uff1a" in after_invalid_results[0].text
+    assert "你的猪圈共有 2 只小猪：" in after_invalid_results[0].text
 
     named_results = await collect(named_owner_event, "add")
-    named_text = named_results[0].text.split("\uff08体质异变\uff1a", 1)[0]
-    assert named_text == "已添加独立小猪\uff1a白雪 小猪"
+    assert named_results[0].text.splitlines()[0] == "成功添加小猪白雪 小猪！"
 
     named_target_results = await collect(named_target_event, "add")
-    named_target_text = named_target_results[0].text.split(
-        "\uff08体质异变\uff1a", 1
-    )[0]
-    assert named_target_text == (
-        "已将用户 target-2 添加为小猪\uff1a花花 猪"
+    assert named_target_results[0].text.splitlines()[0] == (
+        "成功将@target-2 花花 猪添加进猪圈！"
     )
 
     rename_results = await collect(rename_event, "rename")
-    assert rename_results[0].text == "已将第 1 只小猪改名为\uff1a粉红 小猪"
+    assert rename_results[0].text.endswith("改名为粉红 小猪。")
 
     shown_after_rename = await collect(owner_event, "show")
     assert "1. 粉红 小猪" in shown_after_rename[0].text
@@ -300,7 +338,11 @@ async def assert_random_stat_markers() -> None:
     )
     anomalous_results = await collect(anomalous_event, "add")
     assert anomalous_results[0].text == (
-        "已添加独立小猪\uff1a异常 小猪\uff08体质异变\uff1a心情 45\uff09"
+        "成功添加小猪异常 小猪！\\n"
+        "体重：5.0 kg\\n"
+        "健康：100\\n"
+        "！！心情：45！！\\n"
+        "活力：80"
     )
 
     service_module.roll_initial_stats = lambda rng=None: normal
@@ -311,7 +353,13 @@ async def assert_random_stat_markers() -> None:
         message_str="pig add 常态 小猪",
     )
     normal_results = await collect(normal_event, "add")
-    assert normal_results[0].text == "已添加独立小猪\uff1a常态 小猪"
+    assert normal_results[0].text == (
+        "成功添加小猪常态 小猪！\\n"
+        "体重：5.0 kg\\n"
+        "健康：100\\n"
+        "心情：70\\n"
+        "活力：80"
+    )
 
 
 async def assert_diary_and_daily_tick() -> None:
@@ -507,7 +555,9 @@ async def assert_llm_user_interaction() -> None:
 
     reply = await plugin._handle_user_interaction(message_event)
 
-    assert reply == "已经给小猪喂了一碗玉米糊。"
+    assert reply.startswith("已经给小猪喂了一碗玉米糊。\\n具体数值变化：\\n")
+    assert "体重 +0.10" in reply
+    assert "心情 +5" in reply
     assert len(fake_llm.prompts) == 2
     assert "1. " in fake_llm.prompts[0]
     assert "全局数值约束" in fake_llm.prompts[1]
@@ -599,10 +649,23 @@ def test_llm_schema_uses_astrbot_provider_selector() -> None:
 
     # Then AstrBot can populate it from configured provider/model entries
     assert llm.type_name == "string"
-    assert llm.description == "建议使用快速稳定的大模型"
+    assert llm.description == "LLM交互模型配置"
     assert llm.special == "select_provider"
     assert llm.default == ""
-    assert llm.hint == "建议使用快速稳定的大模型"
+    assert llm.hint == "建议使用快速稳定的模型选项，获得更好的体验。"
+
+
+def test_admin_ids_schema_is_a_string_list() -> None:
+    # Given the plugin WebUI schema
+    raw = (PROJECT_ROOT / "_conf_schema.json").read_text(encoding="utf-8")
+
+    # When the administrator setting is inspected
+    admin_ids = PluginSchema.model_validate_json(raw).admin_ids
+
+    # Then the panel exposes an optional list of user IDs
+    assert admin_ids.type_name == "list"
+    assert admin_ids.default == []
+    assert admin_ids.items == {"type": "string"}
 
 
 def test_metadata_declares_required_plugin_contract() -> None:
@@ -615,7 +678,7 @@ def test_metadata_declares_required_plugin_contract() -> None:
     # Then required fields and the approved compatibility range are present
     assert {
         "name: astrbot_plugin_pigsty",
-        'desc: "群友小猪圈基础插件"',
+        'desc: "一个可以把群友圈养起来的养猪猪插件"',
         "version: v0.1.0",
         "author: when",
         "repo: https://github.com/rorangeeee/astrbot_plugin_pigsty",

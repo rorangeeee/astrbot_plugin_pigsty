@@ -17,6 +17,7 @@ class MessageChain:
 
 class AstrMessageEvent:
     message_str: str
+    role: str
 
     def __init__(
         self,
@@ -25,11 +26,15 @@ class AstrMessageEvent:
         group_id: str | None = None,
         messages: tuple[_MessageComponent, ...] = (),
         message_str: str = "",
+        *,
+        role: str = "member",
+        admin: bool = False,
     ) -> None: ...
     def get_sender_id(self) -> str: ...
     def get_platform_id(self) -> str: ...
     def get_group_id(self) -> str | None: ...
     def get_messages(self) -> tuple[_MessageComponent, ...]: ...
+    def is_admin(self) -> bool: ...
     def plain_result(self, text: str) -> MessageEventResult: ...
 
 class filter:

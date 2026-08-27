@@ -86,6 +86,7 @@ def test_add_member_rejects_duplicate_member_pair(tmp_path: Path) -> None:
         # Then the typed conflict identifies the duplicate pair and no extra pig exists
         assert captured.value.platform_id == "qq"
         assert captured.value.user_id == "target"
+        assert captured.value.pig_name == first.name
         assert await service.list_pigs(identity) == (first,)
 
     run_async(scenario)

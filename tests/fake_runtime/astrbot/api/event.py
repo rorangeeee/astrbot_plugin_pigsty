@@ -42,12 +42,17 @@ class AstrMessageEvent:
         group_id: str | None = None,
         messages: tuple[object, ...] = (),
         message_str: str = "",
+        *,
+        role: str = "member",
+        admin: bool = False,
     ) -> None:
         self._sender_id: str = sender_id
         self._platform_id: str = platform_id
         self._group_id: str | None = group_id
         self._messages: tuple[object, ...] = messages
         self.message_str: str = message_str
+        self.role: str = role
+        self._admin: bool = admin
 
     def get_sender_id(self) -> str:
         """Return the event sender identifier."""
@@ -64,6 +69,10 @@ class AstrMessageEvent:
     def get_messages(self) -> tuple[object, ...]:
         """Return the event message components."""
         return self._messages
+
+    def is_admin(self) -> bool:
+        """Return the test event's platform administrator flag."""
+        return self._admin
 
     def plain_result(self, text: str) -> MessageEventResult:
         """Wrap command text in the public result type for smoke tests."""

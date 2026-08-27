@@ -74,6 +74,23 @@ def test_pig_allows_missing_member_association() -> None:
     assert pig.member_user_id is None
 
 
+def test_pig_allows_long_member_nickname_without_extending_pig_name() -> None:
+    # Given a linked member whose group nickname is longer than the pig limit
+    nickname = "这是一个很长的群昵称" * 8
+
+    # When the linked pig is created with an independent short pig name
+    pig = Pig(
+        member_platform_id="qq",
+        member_user_id="7",
+        member_name=nickname,
+        name="小猪",
+    )
+
+    # Then the member nickname is stored separately from the pig nickname
+    assert pig.member_name == nickname
+    assert pig.name == "小猪"
+
+
 @pytest.mark.parametrize(
     ("member_platform_id", "member_user_id"),
     [("qq", None), (None, "7")],

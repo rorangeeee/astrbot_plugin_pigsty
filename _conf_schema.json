@@ -1,10 +1,19 @@
 {
   "llm_provider_id": {
     "type": "string",
-    "description": "建议使用快速稳定的大模型",
+    "description": "LLM交互模型配置",
     "_special": "select_provider",
     "default": "",
-    "hint": "建议使用快速稳定的大模型"
+    "hint": "建议使用快速稳定的模型选项，获得更好的体验。"
+  },
+  "admin_ids": {
+    "type": "list",
+    "description": "管理员ID列表",
+    "hint": "填写可执行 pig status 的用户ID",
+    "default": [],
+    "items": {
+      "type": "string"
+    }
   },
   "pigsty_scope": {
     "type": "string",

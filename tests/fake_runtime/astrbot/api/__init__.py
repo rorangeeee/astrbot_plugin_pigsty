@@ -2,7 +2,7 @@
 
 from typing import TypeAlias
 
-ConfigValue: TypeAlias = str | int | float | bool | None
+ConfigValue: TypeAlias = str | int | float | bool | list[str] | tuple[str, ...] | None
 
 
 class AstrBotConfig(dict[str, ConfigValue]):

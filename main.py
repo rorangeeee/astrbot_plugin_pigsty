@@ -55,7 +55,7 @@ if TYPE_CHECKING:
 
     from .core.interaction import UserInteractionPlan
     from .core.models import Pig, PigEvent
-    from .core.randomizer import InitialStatsRoll
+    from .core.randomizer import InitialStatsRoll, RolledStat
     from .core.service import DailyTickSummary, UnexpectedOutcome
     from .core.unexpected import StatChange
 
@@ -64,11 +64,15 @@ ADD_USAGE: Final = "pig add [@用户] [名字]"
 RENAME_USAGE: Final = "pig rename <序号> <新名字>"
 DIARY_USAGE: Final = "pig diary [序号]"
 LETGO_USAGE: Final = "pig letgo [序号/id/昵称]"
+STATUS_USAGE: Final = "pig status"
+SHOW_USAGE: Final = "pig show"
 UNKNOWN_COMMAND_USAGE: Final = (
-    f"用法：pig status | {ADD_USAGE} | {RENAME_USAGE} | {DIARY_USAGE} | "
-    f"{LETGO_USAGE} | pig show"
+    f"用法：\n{STATUS_USAGE}\n{ADD_USAGE}\n{RENAME_USAGE}\n"
+    f"{DIARY_USAGE}\n{LETGO_USAGE}\n{SHOW_USAGE}"
 )
 LLM_PROVIDER_FIELD: Final = "llm_provider_id"
+ADMIN_IDS_FIELD: Final = "admin_ids"
+STATUS_ADMIN_ONLY_MESSAGE: Final = "此命令仅限管理员使用。"
 LETGO_FALLBACK_FAREWELL: Final = (
     "谢谢你这段时间的陪伴，我会在温馨的乐园里好好生活，也会一直记得你。"
 )
@@ -115,9 +119,10 @@ UNEXPECTED_PROMPT_TEMPLATE: Final = (
     "要求：仅输出事件描述本身（一句话，不超过50字），不要输出任何其他内容。"
 )
 UNEXPECTED_PUSH_TEMPLATE: Final = (
-    "⚠️ 突发事件：{position}. {name}\n{description}\n（数值变化：{changes}）"
+    "⚠️ 突发事件：{position}. {name}\n{description}\n（数值变化：\n{changes}）"
 )
 USER_INTERACTION_REPLY_LIMIT: Final = 500
+PIG_NAME_MAX_LENGTH: Final = 32
 
 
 class InvalidMemberTargetError(Exception):
@@ -216,7 +221,7 @@ class AstrBotPusher:
 @register(
     PLUGIN_NAME,
     "when",
-    "群友小猪圈基础插件",
+    "一个可以把群友圈养起来的养猪猪插件",
     "v0.1.0",
     "https://github.com/rorangeeee/astrbot_plugin_pigsty",
 )
@@ -235,6 +240,7 @@ class PigstyPlugin(Star):
         super().__init__(context)
         self.scope: PigstyScope = self._read_scope(config)
         self.llm_provider_id: str | None = self._read_llm_provider_id(config)
+        self.admin_ids: frozenset[str] = self._read_admin_ids(config)
         self.data_dir: Path = StarTools.get_data_dir(PLUGIN_NAME)
         self.data_dir.mkdir(parents=True, exist_ok=True)
         self.repository: JsonPigstyRepository = JsonPigstyRepository(self.data_dir)
@@ -263,6 +269,121 @@ class PigstyPlugin(Star):
             )
         normalized = raw_provider_id.strip()
         return normalized or None
+
+    @staticmethod
+    def _read_admin_ids(config: AstrBotConfig | None) -> frozenset[str]:
+        """Read configured user IDs allowed to invoke administrator commands."""
+        if config is None:
+            return frozenset()
+        raw_ids: object = config.get(
+            ADMIN_IDS_FIELD,
+            config.get("admin_id", config.get("admin_qq_list", [])),
+        )
+        values: tuple[object, ...]
+        if isinstance(raw_ids, str):
+            values = tuple(re.split(r"[,\n\r]+", raw_ids))
+        elif isinstance(raw_ids, (list, tuple, set, frozenset)):
+            values = tuple(raw_ids)
+        else:
+            values = ()
+        return frozenset(
+            str(value).strip() for value in values if str(value).strip()
+        )
+
+    def _is_admin(self, event: AstrMessageEvent) -> bool:
+        """Return whether an event sender is an AstrBot or configured admin."""
+        role = str(getattr(event, "role", "")).strip().lower()
+        if role in {"admin", "owner"}:
+            return True
+        is_admin = getattr(event, "is_admin", None)
+        if isinstance(is_admin, bool) and is_admin:
+            return True
+        if callable(is_admin):
+            try:
+                if bool(is_admin()):
+                    return True
+            except Exception:
+                self.logger.debug(
+                    "failed to query event administrator state",
+                    exc_info=True,
+                )
+        return str(event.get_sender_id()).strip() in self.admin_ids
+
+    @staticmethod
+    def _member_target_name_for_event(
+        event: AstrMessageEvent,
+        target: str,
+    ) -> str | None:
+        """Read a mention's display name without using it as the pig name."""
+        for segment in event.get_messages():
+            if not isinstance(segment, At) or str(segment.qq).strip() != target:
+                continue
+            for attribute in (
+                "name",
+                "display_name",
+                "nickname",
+                "user_name",
+            ):
+                attribute_name = attribute
+                value = getattr(segment, attribute_name, None)
+                if isinstance(value, str) and value.strip():
+                    return value.strip().lstrip("@").strip() or None
+        for method_name in (
+            "get_target_name",
+            "get_member_name",
+            "get_user_name",
+        ):
+            method = getattr(event, method_name, None)
+            if not callable(method):
+                continue
+            try:
+                value = method(target)
+            except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+                continue
+            if isinstance(value, str) and value.strip():
+                return value.strip().lstrip("@").strip() or None
+        tail = PigstyPlugin._command_tail(event, "add")
+        mention = re.match(r"@([^\s]+)", tail)
+        if mention is not None:
+            return mention.group(1).strip() or None
+        return None
+
+    @classmethod
+    def _member_pig_name_for_event(  # noqa: C901
+        cls,
+        event: AstrMessageEvent,
+        target: str,
+    ) -> str | None:
+        """Extract an explicit pig name while discarding mention nicknames."""
+        tail = cls._command_tail(event, "add")
+        if not tail:
+            return None
+        member_name = cls._member_target_name_for_event(event, target)
+        candidate = re.sub(r"^\[CQ:at,[^\]]+\]\s*", "", tail, flags=re.IGNORECASE)
+        if candidate.startswith("@"):
+            mention_text = candidate[1:].lstrip()
+            if member_name and mention_text.startswith(member_name):
+                remainder = mention_text[len(member_name) :]
+                if not remainder or remainder[0].isspace():
+                    candidate = remainder.strip()
+                else:
+                    candidate = mention_text
+            else:
+                _, _, candidate = mention_text.partition(" ")
+                candidate = candidate.strip()
+            if not candidate:
+                return None
+        if candidate in {target, f"@{target}"}:
+            return None
+        if candidate.startswith(f"{target} "):
+            candidate = candidate[len(target) :].strip()
+        if member_name and candidate == member_name:
+            return None
+        if member_name and candidate.startswith(f"{member_name} "):
+            candidate = candidate[len(member_name) :].strip()
+        if member_name is None and len(candidate) > PIG_NAME_MAX_LENGTH:
+            return None
+        return candidate or None
 
     def _start_tick_task(self) -> asyncio.Task[None] | None:
         """Start the background loop when an event loop is already running."""
@@ -421,7 +542,7 @@ class PigstyPlugin(Star):
         farewell = await self._letgo_farewell(result, identity)
         return (
             f"已将{result.pig.name}放生，ta会在一个不愁吃喝、安全温馨的地方度过它幸福的余生。"
-            f"它很感谢你这段时间的陪伴。\n"
+            f"它很感谢你这段时间的陪伴。\n\n"
             f"它走之前对你留下了一些话：{farewell}"
         )
 
@@ -472,7 +593,7 @@ class PigstyPlugin(Star):
                 parts.append(f"精力 {change.delta:+.2f}")
             else:
                 parts.append(f"{label} {change.delta:+.2f}")
-        return "，".join(parts)
+        return "\n".join(parts)
 
     @filter.event_message_type(filter.EventMessageType.ALL)
     async def on_pigsty_user_message(
@@ -560,13 +681,21 @@ class PigstyPlugin(Star):
         pigs: tuple[Pig, ...],
     ) -> str:
         """Render the LLM reply, falling back to a stat-change summary."""
+        if len(plan.interactions) == 1:
+            changes = PigstyPlugin._render_stat_changes(
+                plan.interactions[0].changes
+            )
+        else:
+            changes = "\n".join(
+                f"{pig.name}：\n{PigstyPlugin._render_stat_changes(interaction.changes)}"
+                for pig, interaction in zip(pigs, plan.interactions, strict=True)
+            )
         if plan.reply:
-            return plan.reply[:USER_INTERACTION_REPLY_LIMIT]
-        parts = [
-            f"{pig.name}：{PigstyPlugin._render_stat_changes(interaction.changes)}"
-            for pig, interaction in zip(pigs, plan.interactions, strict=True)
-        ]
-        return "已记录小猪互动：" + "；".join(parts)
+            return (
+                f"{plan.reply[:USER_INTERACTION_REPLY_LIMIT]}\n"
+                f"具体数值变化：\n{changes}"
+            )
+        return "已记录小猪互动：\n具体数值变化：\n" + changes
 
     @staticmethod
     def _read_scope(config: AstrBotConfig | None) -> PigstyScope:
@@ -633,17 +762,19 @@ class PigstyPlugin(Star):
 
         lines = [f"你的猪圈共有 {len(pigs)} 只小猪："]
         for index, pig in enumerate(pigs, start=1):
-            member = (
-                "独立小猪"
-                if pig.member_user_id is None
-                else f"关联用户 {pig.member_user_id}"
+            member = ""
+            if pig.member_user_id is not None:
+                member_label = (pig.member_name or pig.member_user_id).lstrip("@")
+                member = f" @{member_label}"
+            lines.extend(
+                (
+                    f"{index}. {pig.name}{member}",
+                    f"体重：{pig.weight_kg:.1f}kg",
+                    f"健康：{pig.health}",
+                    f"心情：{pig.mood}",
+                    f"体力：{pig.energy}",
+                )
             )
-            line = (
-                f"{index}. {pig.name}（{member}）"
-                f"体重：{pig.weight_kg:.1f}kg，健康：{pig.health}，"
-                f"心情：{pig.mood}，体力：{pig.energy}"
-            )
-            lines.append(line)
         return "\n".join(lines)
 
     @staticmethod
@@ -652,14 +783,36 @@ class PigstyPlugin(Star):
         anomalies = roll.anomalies
         if not anomalies:
             return ""
-        parts: list[str] = []
-        for stat in anomalies:
-            label = STAT_LABELS[stat.key]
-            if stat.key == "weight_kg":
-                parts.append(f"{label} {stat.value:.1f}kg")
-            else:
-                parts.append(f"{label} {stat.value}")
-        return f"（体质异变：{'，'.join(parts)}）"
+        return "\n".join(PigstyPlugin._render_add_stat(stat) for stat in anomalies)
+
+    @staticmethod
+    def _render_add_stat(stat: RolledStat) -> str:
+        """Render one add-success stat with tier-specific exclamation marks."""
+        key = stat.key
+        value = stat.value
+        tier = stat.tier.value
+        mark_count = {
+            "normal": 0,
+            "minor": 1,
+            "major": 2,
+            "extreme": 3,
+        }.get(str(tier), 0)
+        marks = "！" * mark_count
+        label = {
+            "weight_kg": "体重",
+            "health": "健康",
+            "mood": "心情",
+            "energy": "活力",
+        }[key]
+        value_text = (
+            f"{float(value):.1f} kg" if key == "weight_kg" else str(int(value))
+        )
+        return f"{marks}{label}：{value_text}{marks}"
+
+    @classmethod
+    def _render_add_stats(cls, roll: InitialStatsRoll) -> str:
+        """Render all newborn stats, marking every non-normal tier."""
+        return "\n".join(cls._render_add_stat(stat) for stat in roll.stats)
 
     @staticmethod
     def _render_diary(
@@ -683,18 +836,16 @@ class PigstyPlugin(Star):
         if not notable:
             return empty_text
         pig_names = {pig.pig_id: pig.name for pig in pigs}
-        pig_positions = {pig.pig_id: index for index, pig in enumerate(pigs, start=1)}
         lines = [header]
         for index, event in enumerate(reversed(notable[-DIARY_LIMIT:]), start=1):
-            pig_label = (
-                f"{pig_positions.get(event.pig_id, 0)}. "
-                f"{pig_names.get(event.pig_id, '未知小猪')}"
-            )
             category_label = EVENT_CATEGORY_LABELS.get(event.category, event.category)
             local_time = event.occurred_at.astimezone(DAY_TZ)
-            lines.append(
-                f"{index}. [{category_label}] {local_time:%Y-%m-%d %H:%M} · "
-                f"{pig_label}：{event.description}"
+            lines.extend(
+                (
+                    f"{index}. [{category_label}]",
+                    f"{local_time:%Y-%m-%d %H:%M}",
+                    f"{pig_names.get(event.pig_id, '未知小猪')}：{event.description}",
+                )
             )
         return "\n".join(lines)
 
@@ -707,7 +858,13 @@ class PigstyPlugin(Star):
         """Report foundation readiness without exposing internal Pig UUIDs."""
         normalized_action = action.strip().lower()
         if normalized_action == "status":
+            if not self._is_admin(event):
+                yield event.plain_result(STATUS_ADMIN_ONLY_MESSAGE)
+                return
             yield event.plain_result(f"Pigsty 数据层已就绪\n作用域：{self.scope.value}")
+            return
+        if normalized_action == "help":
+            yield event.plain_result(UNKNOWN_COMMAND_USAGE)
             return
         if normalized_action == "add":
             try:
@@ -717,32 +874,41 @@ class PigstyPlugin(Star):
                 return
 
             identity = self._identity_for_event(event)
-            name = self._command_tail(event, normalized_action) or None
             if target is None:
+                name = self._command_tail(event, normalized_action) or None
                 try:
                     creation = await self.service.add_random(identity, name)
                 except ValidationError:
                     yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                     return
                 pig = creation.pig
-                anomalies = self._render_stat_anomalies(creation.roll)
-                yield event.plain_result(f"已添加独立小猪：{pig.name}{anomalies}")
+                yield event.plain_result(
+                    f"成功添加小猪{pig.name}！\n{self._render_add_stats(creation.roll)}"
+                )
                 return
 
+            name = self._member_pig_name_for_event(event, target)
+            member_name = self._member_target_name_for_event(event, target) or target
             try:
                 creation = await self.service.add_member(
-                    identity, identity.platform_id, target, name
+                    identity,
+                    identity.platform_id,
+                    target,
+                    name,
+                    member_name=member_name,
                 )
-            except DuplicateMemberPigError:
-                yield event.plain_result("该用户已经在你的猪圈中。")
+            except DuplicateMemberPigError as error:
+                yield event.plain_result(
+                    f"该小猪{error.pig_name or member_name or target}已经在你的猪圈中。"
+                )
                 return
             except ValidationError:
                 yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                 return
             pig = creation.pig
-            anomalies = self._render_stat_anomalies(creation.roll)
             yield event.plain_result(
-                f"已将用户 {target} 添加为小猪：{pig.name}{anomalies}"
+                f"成功将@{target} {pig.name}添加进猪圈！\n"
+                f"{self._render_add_stats(creation.roll)}"
             )
             return
         if normalized_action == "rename":
@@ -763,17 +929,22 @@ class PigstyPlugin(Star):
             if position < 1:
                 yield event.plain_result("用法：pig rename <序号> <新名字>")
                 return
+            identity = self._identity_for_event(event)
+            old_name: str | None = None
             try:
-                pig = await self.service.rename_pig(
-                    self._identity_for_event(event), position, name
-                )
+                pigs = await self.service.list_pigs(identity)
+                if 1 <= position <= len(pigs):
+                    old_name = pigs[position - 1].name
+                pig = await self.service.rename_pig(identity, position, name)
             except PigPositionNotFoundError:
                 yield event.plain_result("用法：pig rename <序号> <新名字>")
                 return
             except ValidationError:
                 yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                 return
-            yield event.plain_result(f"已将第 {position} 只小猪改名为：{pig.name}")
+            yield event.plain_result(
+                f"已将{old_name or pig.name}改名为{pig.name}。"
+            )
             return
         if normalized_action == "diary":
             identity = self._identity_for_event(event)

@@ -8,3 +8,4 @@ class At:
     """Minimal public mention component."""
 
     qq: int | str
+    name: str | None = None
