@@ -258,6 +258,23 @@ def test_apply_stat_changes_updates_only_targeted_fields() -> None:
     assert updated.health == 50
     assert updated.energy == 42
     assert updated.age_days == pig.age_days
+
+
+def test_apply_stat_changes_can_keep_scheduled_health_above_zero() -> None:
+    # Given a pig whose scheduled event would otherwise reduce health to zero
+    pig = make_pig(health=2)
+    occurred_at = datetime(2026, 8, 14, 15, 0, tzinfo=DAY_TZ)
+
+    # When the event applies a severe negative health delta
+    updated = apply_stat_changes(
+        pig,
+        (StatChange(key="health", delta=-20),),
+        occurred_at,
+        health_floor=1,
+    )
+
+    # Then the scheduled-event floor keeps the pig alive
+    assert updated.health == 1
     assert updated.updated_at == occurred_at
     assert updated.last_state_update_at == pig.last_state_update_at
     assert updated.pig_id == pig.pig_id

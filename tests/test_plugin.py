@@ -74,6 +74,7 @@ def test_plugin_import_and_initialization_use_astrbot_boundary(tmp_path: Path) -
 from pathlib import Path
 import os
 import inspect
+import logging
 
 import anyio
 import pytest
@@ -86,6 +87,7 @@ from astrbot_plugin_pigsty.core.identity import (
     PigstyScope,
     resolve_session_identity,
 )
+from astrbot_plugin_pigsty.core.models import Pig
 from astrbot_plugin_pigsty.main import PigstyPlugin
 
 inspect.signature(PigstyPlugin.pig_command, eval_str=True)
@@ -301,6 +303,37 @@ async def assert_macro_commands() -> None:
 
     invalid_rename_results = await collect(invalid_rename_event, "rename")
     assert invalid_rename_results[0].text == "用法\uff1apig rename <序号> <新名字>"
+
+
+async def assert_letgo_does_not_use_llm() -> None:
+    identity = resolve_session_identity(
+        PigstyScope.GROUP,
+        "qq",
+        "letgo-owner",
+        "letgo-group",
+    )
+    release_event = AstrMessageEvent(
+        sender_id="letgo-owner",
+        platform_id="qq",
+        group_id="letgo-group",
+        message_str="pig letgo 1",
+    )
+    _ = await plugin.service.add_random(identity, "待放生猪")
+
+    class FailingLlm:
+        async def complete(self, prompt: str) -> str:
+            raise AssertionError(f"pig letgo must not call the LLM: {prompt}")
+
+    plugin._llm = FailingLlm()
+    results = await collect(release_event, "letgo")
+
+    assert results[0].text == (
+        "已将待放生猪放生，ta会在一个不愁吃喝、安全温馨的地方度过它幸福的余生。"
+        "它很感谢你这段时间的陪伴。"
+    )
+    assert await plugin.service.list_pigs(identity) == ()
+    assert await plugin.service.list_events(identity) == ()
+    assert "它走之前对你留下了一些话：" not in results[0].text
 
 
 async def assert_random_stat_markers() -> None:
@@ -546,14 +579,31 @@ async def assert_llm_user_interaction() -> None:
 
     fake_llm = ScriptedLlm()
     plugin._llm = fake_llm
+    class CaptureHandler(logging.Handler):
+        def __init__(self) -> None:
+            super().__init__()
+            self.messages: list[str] = []
+
+        def emit(self, record: logging.LogRecord) -> None:
+            self.messages.append(record.getMessage())
+
+    capture_handler = CaptureHandler()
+    previous_level = plugin.logger.level
+    plugin.logger.setLevel(logging.INFO)
+    plugin.logger.addHandler(capture_handler)
     message_event = AstrMessageEvent(
         sender_id="owner-a",
         platform_id="qq",
         group_id="group-1",
         message_str="给小猪喂一碗玉米糊",
+        is_at_or_wake_command=True,
     )
 
-    reply = await plugin._handle_user_interaction(message_event)
+    try:
+        reply = await plugin._handle_user_interaction(message_event)
+    finally:
+        plugin.logger.removeHandler(capture_handler)
+        plugin.logger.setLevel(previous_level)
 
     assert reply.startswith("已经给小猪喂了一碗玉米糊。\\n具体数值变化：\\n")
     assert "体重 +0.10" in reply
@@ -566,12 +616,103 @@ async def assert_llm_user_interaction() -> None:
     after = await plugin.service.list_pigs(identity)
     assert after[0].weight_kg == pytest.approx(before[0].weight_kg + 0.10)
     assert after[0].mood == min(before[0].mood + 5, 100)
+    pigsty_log = plugin._pigsty_log_label(identity)
+    assert f"Pigsty 判断到对小猪执行动作：猪圈={pigsty_log}" in capture_handler.messages
+    actual_changes = plugin._render_stat_changes(
+        plugin._actual_stat_changes(before[0], after[0])
+    ).replace("\n", "；")
+    assert (
+        f"Pigsty 小猪数值变动：猪圈={pigsty_log}，小猪={after[0].name}，"
+        f"变化：{actual_changes}"
+    ) in capture_handler.messages
 
     events = await plugin.service.list_events(identity)
     user_events = [event for event in events if event.category == "user_events"]
     assert len(user_events) == 1
     assert user_events[0].pig_id == before[0].pig_id
     assert user_events[0].description == "喂了一碗玉米糊"
+
+    class GuardLlm:
+        def __init__(self) -> None:
+            self.prompts: list[str] = []
+
+        async def complete(self, prompt: str) -> str:
+            self.prompts.append(prompt)
+            return '{"involves_pigs": false}'
+
+    ordinary_llm = GuardLlm()
+    plugin._llm = ordinary_llm
+    ordinary_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="普通群聊，不要触发小猪互动",
+    )
+    before_ordinary = await plugin.service.list_pigs(identity)
+    assert await plugin._handle_user_interaction(ordinary_event) is None
+    assert ordinary_llm.prompts == []
+    assert await plugin.service.list_pigs(identity) == before_ordinary
+
+    other_mention_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        messages=(At(qq="another-user"),),
+        message_str="@another-user 给小猪喂饭",
+    )
+    assert await plugin._handle_user_interaction(other_mention_event) is None
+    assert ordinary_llm.prompts == []
+
+    bot_mention_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        messages=(At(qq="bot"),),
+        message_str="@bot 给小猪喂饭",
+    )
+    bot_llm = ScriptedLlm()
+    plugin._llm = bot_llm
+    assert await plugin._handle_user_interaction(bot_mention_event)
+    assert len(bot_llm.prompts) == 2
+
+    class DeathLlm:
+        def __init__(self) -> None:
+            self.responses = [
+                '{"involves_pigs": true}',
+                (
+                    '{"interactions": [{"pig_position": 1, '
+                    '"description": "造成致命伤害", '
+                    '"changes": {"health": -200}}], '
+                    '"reply": "互动完成。"}'
+                ),
+            ]
+
+        async def complete(self, prompt: str) -> str:
+            return self.responses.pop(0)
+
+    death_llm = DeathLlm()
+    plugin._llm = death_llm
+    death_target = (await plugin.service.list_pigs(identity))[0]
+    death_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        messages=(At(qq="bot"),),
+        message_str="@bot 让第一只小猪承受致命伤害",
+    )
+    death_reply = await plugin._handle_user_interaction(death_event)
+    assert death_reply == f"@owner-a，很抱歉，你的小猪{death_target.name}已死亡。"
+    assert death_target not in await plugin.service.list_pigs(identity)
+    death_show = await collect(death_event, "show")
+    assert death_show[0].text == "你的猪圈还是空的，使用 pig add 添加一只小猪吧。"
+    linked_pig = Pig(
+        member_platform_id="qq",
+        member_user_id="linked-user",
+        name="关联猪",
+    )
+    assert plugin._render_death_notice(identity, linked_pig) == (
+        "@owner-a @linked-user，很抱歉，你的小猪关联猪已死亡。"
+    )
 
     pig_command_event = AstrMessageEvent(
         sender_id="owner-a",
@@ -595,6 +736,7 @@ async def assert_llm_user_interaction() -> None:
 
 anyio.run(assert_status_result)
 anyio.run(assert_macro_commands)
+anyio.run(assert_letgo_does_not_use_llm)
 anyio.run(assert_random_stat_markers)
 anyio.run(assert_diary_and_daily_tick)
 anyio.run(assert_llm_user_interaction)

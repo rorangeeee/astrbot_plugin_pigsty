@@ -81,6 +81,7 @@ HEALTH_SPEC: Final = StatSpec(
     base=100.0,
     integer=True,
     upper_bound=BOUNDED_UPPER_BOUND,
+    lower_bound=1.0,
 )
 MOOD_SPEC: Final = StatSpec(
     key="mood",

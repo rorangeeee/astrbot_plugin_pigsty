@@ -70,6 +70,13 @@ def evolve_pig_days(
     if days < 1:
         message = "days must be at least 1"
         raise ValueError(message)
+    if pig.health <= 0:
+        return pig, PigEvent(
+            category=REGULAR_EVENT_CATEGORY,
+            pig_id=pig.pig_id,
+            occurred_at=occurred_at,
+            description="小猪已死亡，未发生成长",
+        )
     evolved = pig
     total_growth = 0.0
     total_mood = 0
@@ -102,8 +109,13 @@ def evolve_document(
 ) -> PigstyDocument:
     """Evolve every due pig for this trigger and record one event each."""
     new_pigs: list[Pig] = []
-    events = document.events
+    deceased_ids = {pig.pig_id for pig in document.pigs if pig.health <= 0}
+    events = tuple(
+        event for event in document.events if event.pig_id not in deceased_ids
+    )
     for pig in document.pigs:
+        if pig.health <= 0:
+            continue
         owed = missed_day_count(pig, now)
         if owed < 1:
             new_pigs.append(pig)
@@ -120,21 +132,28 @@ def _evolve_one_day(pig: Pig, rng: RandomSource) -> tuple[Pig, DayChanges]:
         WEIGHT_DAILY_GROWTH_MIN,
     )
     mood_delta = round(rng.uniform(-MOOD_DAILY_DRIFT, MOOD_DAILY_DRIFT))
-    health_delta = round(rng.uniform(-HEALTH_DAILY_DRIFT, HEALTH_DAILY_DRIFT))
+    sampled_health_delta = round(
+        rng.uniform(-HEALTH_DAILY_DRIFT, HEALTH_DAILY_DRIFT)
+    )
     energy = round(rng.uniform(ENERGY_LOWER_BOUND, ENERGY_UPPER_BOUND))
+    health = (
+        0
+        if pig.health <= 0
+        else max(min(pig.health + sampled_health_delta, 100), 1)
+    )
     evolved = Pig.model_validate(
         pig.model_dump()
         | {
             "age_days": pig.age_days + 1,
             "weight_kg": pig.weight_kg + growth,
             "mood": max(min(pig.mood + mood_delta, 100), 0),
-            "health": max(min(pig.health + health_delta, 100), 0),
+            "health": health,
             "energy": energy,
         }
     )
     return evolved, DayChanges(
         growth_kg=growth,
         mood_delta=mood_delta,
-        health_delta=health_delta,
+        health_delta=health - pig.health,
         energy=energy,
     )

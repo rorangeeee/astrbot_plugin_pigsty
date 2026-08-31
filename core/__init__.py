@@ -54,6 +54,7 @@ from .service import (
     UnexpectedOutcome,
     UnexpectedPigNotFoundError,
     UserInteractionPigNotFoundError,
+    UserInteractionResult,
 )
 from .unexpected import (
     StatChange,
@@ -97,6 +98,7 @@ __all__ = [
     "UnexpectedRoll",
     "UserInteractionPigNotFoundError",
     "UserInteractionPlan",
+    "UserInteractionResult",
     "UserPigInteraction",
     "already_rolled_today",
     "apply_stat_changes",

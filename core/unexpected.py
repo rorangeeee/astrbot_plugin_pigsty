@@ -69,6 +69,8 @@ def roll_unexpected_for_pig(
     rng: RandomSource,
 ) -> UnexpectedRoll:
     """Roll one pig's daily unexpected-event dice and persist its pity state."""
+    if pig.health <= 0:
+        return UnexpectedRoll(pig=pig, rolled=False, triggered=False, changes=())
     if already_rolled_today(pig, now):
         return UnexpectedRoll(pig=pig, rolled=False, triggered=False, changes=())
     triggered = rng.random() < pig.unexpected_chance_percent / 100
@@ -126,6 +128,7 @@ def _spec_for(pig: Pig, key: str) -> StatSpec:
                 base=float(pig.health),
                 integer=True,
                 upper_bound=BOUNDED_UPPER_BOUND,
+                lower_bound=1.0,
             )
         case "mood":
             return StatSpec(
@@ -165,8 +168,18 @@ def apply_stat_changes(
     pig: Pig,
     changes: tuple[StatChange, ...],
     occurred_at: datetime,
+    *,
+    health_floor: int = 0,
 ) -> Pig:
-    """Apply unexpected stat deltas without touching the evolution marker."""
+    """Apply stat deltas without touching the daily-evolution marker.
+
+    User interactions may reduce health to zero, while scheduled event
+    systems pass ``health_floor=1`` so a daily or unexpected event cannot
+    kill a pig.
+    """
+    if health_floor not in {0, 1}:
+        message = "health_floor must be 0 or 1"
+        raise ValueError(message)
     updates: dict[str, float | int | datetime] = {}
     for change in changes:
         match change.key:
@@ -178,7 +191,13 @@ def apply_stat_changes(
             case "mood":
                 updates["mood"] = _clamp_int(pig.mood + change.delta)
             case "health":
-                updates["health"] = _clamp_int(pig.health + change.delta)
+                if pig.health <= 0:
+                    updates["health"] = 0
+                else:
+                    updates["health"] = max(
+                        _clamp_int(pig.health + change.delta),
+                        health_floor,
+                    )
             case "energy":
                 updates["energy"] = _clamp_int(pig.energy + change.delta)
             case _:

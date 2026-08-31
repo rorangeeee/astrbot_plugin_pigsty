@@ -9,6 +9,7 @@ import anyio
 import pytest
 from core.identity import PigstyScope, resolve_session_identity
 from core.interaction import UserPigInteraction
+from core.models import PigEvent
 from core.randomizer import roll_initial_stats
 from core.repository import JsonPigstyRepository
 from core.service import (
@@ -488,6 +489,39 @@ def test_apply_unexpected_event_updates_pig_and_records_event(tmp_path: Path) ->
     run_async(scenario)
 
 
+def test_apply_unexpected_event_never_reduces_health_to_zero(tmp_path: Path) -> None:
+    # Given a pig with only two health points
+    repo = JsonPigstyRepository(tmp_path)
+    service = PigstyService(repo)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        pig = (await service.add_random(identity, "脆弱猪")).pig
+        document = await repo.load(identity)
+        weakened = document.model_copy(
+            update={
+                "pigs": (
+                    pig.model_copy(update={"health": 2}),
+                )
+            }
+        )
+        await repo.save(weakened)
+
+        # When a severe unexpected-event health reduction is applied
+        updated = await service.apply_unexpected_event(
+            identity,
+            pig.pig_id,
+            (StatChange(key="health", delta=-20),),
+            "严重受伤",
+            pig.last_state_update_at,
+        )
+
+        # Then the scheduled event leaves the pig at the survival floor
+        assert updated.health == 1
+
+    run_async(scenario)
+
+
 def test_apply_unexpected_event_rejects_missing_pig(tmp_path: Path) -> None:
     # Given an empty pigsty
     service = PigstyService(JsonPigstyRepository(tmp_path))
@@ -552,6 +586,50 @@ def test_apply_user_interaction_clamps_and_records_user_events(tmp_path: Path) -
         assert events[0].pig_id == pig.pig_id
         assert events[0].description == "喂了太多零食"
         assert events[0].occurred_at == occurred
+
+    run_async(scenario)
+
+
+def test_user_interaction_removes_dead_pig_and_event_history(tmp_path: Path) -> None:
+    # Given a pig with two health points and an existing event history
+    repo = JsonPigstyRepository(tmp_path)
+    service = PigstyService(repo)
+    identity = resolve_session_identity(PigstyScope.GLOBAL, "qq", "owner-a", None)
+
+    async def scenario() -> None:
+        pig = (await service.add_random(identity, "将死猪")).pig
+        document = await repo.load(identity)
+        weakened = document.model_copy(
+            update={
+                "pigs": (pig.model_copy(update={"health": 2}),),
+                "events": (
+                    PigEvent(
+                        category="user_events",
+                        pig_id=pig.pig_id,
+                        description="旧记录",
+                    ),
+                ),
+            }
+        )
+        await repo.save(weakened)
+        interaction = UserPigInteraction(
+            position=1,
+            description="做了危险的事",
+            changes=(StatChange(key="health", delta=-20),),
+        )
+
+        # When the user interaction reduces health to zero
+        result = await service.apply_user_interaction_with_deaths(
+            identity,
+            (interaction,),
+            pig.last_state_update_at,
+        )
+
+        # Then the death snapshot is reported and all persisted pig data is gone
+        assert result.updated[0].health == 0
+        assert result.deceased == result.updated
+        assert await service.list_pigs(identity) == ()
+        assert await service.list_events(identity) == ()
 
     run_async(scenario)
 

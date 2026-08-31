@@ -14,7 +14,7 @@ from core.evolution import (
     next_tick_at,
 )
 from core.identity import PigstyScope
-from core.models import REGULAR_EVENT_CATEGORY, Pig, PigstyDocument, utc_now
+from core.models import REGULAR_EVENT_CATEGORY, Pig, PigEvent, PigstyDocument, utc_now
 from tests.conftest import ScriptedRng
 
 DAY = timedelta(days=1)
@@ -128,9 +128,9 @@ def test_evolve_pig_days_clamps_drift_to_model_bounds() -> None:
     # When one day is evolved with extreme drift
     evolved, _ = evolve_pig_days(pig, 1, occurred_at, rng)
 
-    # Then mood and health clamp to the model bounds
+    # Then mood clamps to the model bounds and scheduled events keep health alive
     assert evolved.mood == 100
-    assert evolved.health == 0
+    assert evolved.health == 1
 
 
 def test_evolve_pig_days_records_one_event_per_trigger() -> None:
@@ -202,6 +202,48 @@ def test_evolve_document_only_evolves_due_pigs() -> None:
     assert evolved.events[0].description.startswith("年龄+2")
 
 
+def test_evolve_document_prunes_legacy_dead_pigs_and_their_events() -> None:
+    # Given a document containing a legacy zero-health pig and its event history
+    now = datetime(2026, 8, 14, 9, 0, tzinfo=DAY_TZ)
+    dead = make_pig(datetime(2026, 8, 12, 9, 0, tzinfo=DAY_TZ), health=0)
+    event = PigEvent(
+        category=REGULAR_EVENT_CATEGORY,
+        pig_id=dead.pig_id,
+        description="遗留记录",
+    )
+    document = PigstyDocument(
+        scope=PigstyScope.GLOBAL,
+        platform_id="qq",
+        owner_user_id="owner-a",
+        pigs=(dead,),
+        events=(event,),
+    )
+
+    # When the evolution pass runs
+    evolved = evolve_document(document, now, ScriptedRng())
+
+    # Then the dead pig and all of its events are removed
+    assert evolved.pigs == ()
+    assert evolved.events == ()
+
+
+def test_evolve_pig_days_does_not_revive_a_dead_pig() -> None:
+    # Given a legacy dead pig passed directly to the evolution function
+    pig = make_pig(health=0)
+    occurred_at = datetime(2026, 8, 14, 9, 0, tzinfo=DAY_TZ)
+
+    # When a daily evolution is requested
+    evolved, _ = evolve_pig_days(
+        pig,
+        1,
+        occurred_at,
+        ScriptedRng(uniforms=[0.5, 5.0, 3.0, 10.0]),
+    )
+
+    # Then the dead pig remains dead rather than being revived
+    assert evolved.health == 0
+
+
 def test_evolved_values_always_satisfy_model_bounds() -> None:
     # Given a deterministic seeded random source
     rng = random.Random(11)
@@ -214,7 +256,7 @@ def test_evolved_values_always_satisfy_model_bounds() -> None:
         evolved, _ = evolve_pig_days(pig, 3, occurred_at, rng)
         assert evolved.weight_kg > 0
         assert 0 <= evolved.mood <= 100
-        assert 0 <= evolved.health <= 100
+        assert 1 <= evolved.health <= 100
         assert 0 <= evolved.energy <= 100
         assert evolved.age_days >= 0
         pig = evolved

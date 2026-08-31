@@ -105,6 +105,14 @@ class PigCreation:
 
 
 @dataclass(frozen=True, slots=True)
+class UserInteractionResult:
+    """Applied interaction snapshots and pigs that died during the update."""
+
+    updated: tuple[Pig, ...]
+    deceased: tuple[Pig, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DailyTickSummary:
     """Outcome of one real-time daily evolution trigger."""
 
@@ -116,6 +124,23 @@ class DailyTickSummary:
     failed_documents: int
 
 
+def _prune_deceased(document: PigstyDocument) -> PigstyDocument:
+    """Remove zero-health pigs and their event history from one document."""
+    deceased_ids = {pig.pig_id for pig in document.pigs if pig.health <= 0}
+    if not deceased_ids:
+        return document
+    return document.model_copy(
+        update={
+            "pigs": tuple(
+                pig for pig in document.pigs if pig.pig_id not in deceased_ids
+            ),
+            "events": tuple(
+                event for event in document.events if event.pig_id not in deceased_ids
+            ),
+        }
+    )
+
+
 def _evolve_document_mutation(
     document: PigstyDocument,
     now: datetime,
@@ -123,8 +148,11 @@ def _evolve_document_mutation(
     stats: list[int],
 ) -> PigstyDocument:
     """Apply one evolution pass and report pig and event counts."""
+    document = _prune_deceased(document)
     evolved = evolve_document(document, now, rng)
-    stats[0] += sum(1 for pig in document.pigs if is_due(pig, now))
+    stats[0] += sum(
+        1 for pig in document.pigs if pig.health > 0 and is_due(pig, now)
+    )
     stats[1] += len(evolved.events) - len(document.events)
     return evolved
 
@@ -178,8 +206,11 @@ def _roll_unexpected_mutation(
     outcomes: list[UnexpectedOutcome],
 ) -> PigstyDocument:
     """Roll every due pig's unexpected dice and collect triggered drafts."""
+    document = _prune_deceased(document)
     new_pigs: list[Pig] = []
     for pig in document.pigs:
+        if pig.health <= 0:
+            continue
         roll = roll_unexpected_for_pig(pig, now, rng)
         new_pigs.append(roll.pig)
         if roll.triggered:
@@ -216,6 +247,7 @@ class PigstyService:
         )
 
         def append_pig(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
             return document.model_copy(update={"pigs": (*document.pigs, pig)})
 
         _ = await self._repository.update(identity, append_pig)
@@ -244,6 +276,7 @@ class PigstyService:
         )
 
         def append_pig(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
             member_pair = (member_platform_id, member_user_id)
             for existing in document.pigs:
                 if (
@@ -265,6 +298,7 @@ class PigstyService:
         """Rename one persisted pig selected by its 1-based display position."""
 
         def rename(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
             index = position - 1
             if index < 0 or index >= len(document.pigs):
                 raise PigPositionNotFoundError(position)
@@ -281,11 +315,15 @@ class PigstyService:
     async def list_pigs(self, identity: SessionIdentity) -> tuple[Pig, ...]:
         """Return the persisted pigs for one owner in creation order."""
         document = await self._repository.load(identity)
-        return document.pigs
+        if not any(pig.health <= 0 for pig in document.pigs):
+            return document.pigs
+        return (await self._repository.update(identity, _prune_deceased)).pigs
 
     async def list_events(self, identity: SessionIdentity) -> tuple[PigEvent, ...]:
         """Return the persisted events for one owner in record order."""
         document = await self._repository.load(identity)
+        if any(pig.health <= 0 for pig in document.pigs):
+            document = await self._repository.update(identity, _prune_deceased)
         return document.events
 
     async def letgo_pig(
@@ -298,6 +336,7 @@ class PigstyService:
         removed: list[LetgoResult] = []
 
         def remove(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
             index, pig = self._locate_pig(document.pigs, normalized_selector)
             events = tuple(
                 event for event in document.events if event.pig_id == pig.pig_id
@@ -441,11 +480,17 @@ class PigstyService:
         """Apply one unexpected event's stat changes and record it."""
 
         def mutation(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
             pigs = list(document.pigs)
             for index, existing in enumerate(pigs):
                 if existing.pig_id != pig_id:
                     continue
-                updated = apply_stat_changes(existing, changes, occurred_at)
+                updated = apply_stat_changes(
+                    existing,
+                    changes,
+                    occurred_at,
+                    health_floor=1,
+                )
                 event = PigEvent(
                     category=UNEXPECTED_EVENT_CATEGORY,
                     pig_id=pig_id,
@@ -464,17 +509,20 @@ class PigstyService:
         document = await self._repository.update(identity, mutation)
         return next(pig for pig in document.pigs if pig.pig_id == pig_id)
 
-    async def apply_user_interaction(
+    async def apply_user_interaction_with_deaths(
         self,
         identity: SessionIdentity,
         interactions: tuple[UserPigInteraction, ...],
         occurred_at: datetime,
-    ) -> tuple[Pig, ...]:
-        """Apply LLM-derived user interactions and record one user event per pig."""
+    ) -> UserInteractionResult:
+        """Apply interactions, remove pigs reaching zero health, and report them."""
         if not interactions:
-            return await self.list_pigs(identity)
+            return UserInteractionResult(await self.list_pigs(identity), ())
+
+        applied: list[Pig] = []
 
         def mutation(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
             pigs = list(document.pigs)
             events = document.events
             seen_positions: set[int] = set()
@@ -490,7 +538,9 @@ class PigstyService:
                     existing,
                     interaction.changes,
                     occurred_at,
+                    health_floor=0,
                 )
+                applied.append(updated)
                 event = PigEvent(
                     category=USER_EVENT_CATEGORY,
                     pig_id=existing.pig_id,
@@ -499,9 +549,31 @@ class PigstyService:
                 )
                 pigs[index] = updated
                 events = (*events, event)
+            deceased_ids = {pig.pig_id for pig in applied if pig.health <= 0}
+            if deceased_ids:
+                pigs = [pig for pig in pigs if pig.pig_id not in deceased_ids]
+                events = tuple(
+                    event for event in events if event.pig_id not in deceased_ids
+                )
             return document.model_copy(update={"pigs": tuple(pigs), "events": events})
 
-        updated = await self._repository.update(identity, mutation)
-        return tuple(
-            updated.pigs[interaction.position - 1] for interaction in interactions
+        _ = await self._repository.update(identity, mutation)
+        deceased = tuple(pig for pig in applied if pig.health <= 0)
+        return UserInteractionResult(
+            updated=tuple(applied),
+            deceased=deceased,
         )
+
+    async def apply_user_interaction(
+        self,
+        identity: SessionIdentity,
+        interactions: tuple[UserPigInteraction, ...],
+        occurred_at: datetime,
+    ) -> tuple[Pig, ...]:
+        """Apply interactions and return snapshots, preserving the legacy API."""
+        result = await self.apply_user_interaction_with_deaths(
+            identity,
+            interactions,
+            occurred_at,
+        )
+        return result.updated

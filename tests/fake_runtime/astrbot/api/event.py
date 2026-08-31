@@ -45,6 +45,8 @@ class AstrMessageEvent:
         *,
         role: str = "member",
         admin: bool = False,
+        self_id: str = "bot",
+        is_at_or_wake_command: bool = False,
     ) -> None:
         self._sender_id: str = sender_id
         self._platform_id: str = platform_id
@@ -53,6 +55,8 @@ class AstrMessageEvent:
         self.message_str: str = message_str
         self.role: str = role
         self._admin: bool = admin
+        self._self_id: str = self_id
+        self.is_at_or_wake_command: bool = is_at_or_wake_command
 
     def get_sender_id(self) -> str:
         """Return the event sender identifier."""
@@ -69,6 +73,14 @@ class AstrMessageEvent:
     def get_messages(self) -> tuple[object, ...]:
         """Return the event message components."""
         return self._messages
+
+    def get_self_id(self) -> str:
+        """Return the bot identifier associated with the event."""
+        return self._self_id
+
+    def is_private_chat(self) -> bool:
+        """Return whether this fake event represents a private message."""
+        return self._group_id is None or not self._group_id.strip()
 
     def is_admin(self) -> bool:
         """Return the test event's platform administrator flag."""

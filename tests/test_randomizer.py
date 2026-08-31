@@ -205,6 +205,6 @@ def test_rolled_values_always_satisfy_model_bounds() -> None:
         assert isinstance(values["health"], int)
         assert isinstance(values["mood"], int)
         assert isinstance(values["energy"], int)
-        assert 0 <= values["health"] <= 100
+        assert 1 <= values["health"] <= 100
         assert 0 <= values["mood"] <= 100
         assert 0 <= values["energy"] <= 100
