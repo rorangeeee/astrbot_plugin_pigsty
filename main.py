@@ -9,6 +9,7 @@ from collections.abc import (
 )
 from contextlib import suppress
 from dataclasses import dataclass
+from sys import maxsize
 from typing import TYPE_CHECKING, Final, Protocol
 
 import anyio
@@ -521,15 +522,24 @@ class PigstyPlugin(Star):
                 parts.append(f"{label} {change.delta:+.2f}")
         return "\n".join(parts)
 
-    @filter.event_message_type(filter.EventMessageType.ALL)
+    @filter.event_message_type(filter.EventMessageType.ALL, priority=maxsize)
     async def on_pigsty_user_message(
         self,
         event: AstrMessageEvent,
     ) -> AsyncIterator[MessageEventResult]:
-        """Classify free-form chat and apply LLM-derived pig interactions."""
+        """Handle pig interactions before AstrBot's normal persona LLM flow."""
         reply = await self._handle_user_interaction(event)
+        pig_interaction_detected = self._pig_interaction_was_detected(event)
+        if pig_interaction_detected:
+            # Claim the event before yielding our result so AstrBot's default
+            # persona LLM is skipped while the plugin reply is still emitted.
+            self._prevent_default_llm(event)
         if reply:
             yield event.plain_result(reply)
+        if pig_interaction_detected:
+            # Stop propagation only after yielding, otherwise the pipeline can
+            # skip the stage responsible for sending the yielded result.
+            event.stop_event()
 
     async def _handle_user_interaction(  # noqa: C901, PLR0911
         self,
@@ -562,6 +572,7 @@ class PigstyPlugin(Star):
             return None
         if not involves_pigs:
             return None
+        self._mark_pig_interaction_detected(event)
         self.logger.info(
             "Pigsty 判断到对小猪执行动作：猪圈=%s",
             self._pigsty_log_label(identity),
@@ -609,6 +620,25 @@ class PigstyPlugin(Star):
                 for pig in interaction_result.deceased
             )
         return self._render_user_interaction_reply(plan, interaction_result.updated)
+
+    @staticmethod
+    def _mark_pig_interaction_detected(
+        event: AstrMessageEvent,
+    ) -> None:
+        """Mark an event as owned by Pigsty before downstream LLM handling."""
+        event.set_extra("pigsty_interaction_detected", value=True)
+
+    @staticmethod
+    def _pig_interaction_was_detected(
+        event: AstrMessageEvent,
+    ) -> bool:
+        """Read the Pigsty ownership marker from an AstrBot event."""
+        return bool(event.get_extra("pigsty_interaction_detected", default=False))
+
+    @staticmethod
+    def _prevent_default_llm(event: AstrMessageEvent) -> None:
+        """Skip downstream persona/default-LLM processing for Pigsty events."""
+        event.should_call_llm(call_llm=True)
 
     def _log_user_interaction_changes(
         self,

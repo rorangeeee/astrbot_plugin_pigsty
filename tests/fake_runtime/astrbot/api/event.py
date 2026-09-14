@@ -57,6 +57,10 @@ class AstrMessageEvent:
         self._admin: bool = admin
         self._self_id: str = self_id
         self.is_at_or_wake_command: bool = is_at_or_wake_command
+        self.call_llm: bool = False
+        self._stopped: bool = False
+        self._result: MessageEventResult | None = None
+        self._extras: dict[str, object] = {}
 
     def get_sender_id(self) -> str:
         """Return the event sender identifier."""
@@ -89,6 +93,40 @@ class AstrMessageEvent:
     def plain_result(self, text: str) -> MessageEventResult:
         """Wrap command text in the public result type for smoke tests."""
         return MessageEventResult(text)
+
+    def should_call_llm(self, call_llm: bool) -> None:
+        """Record whether the default LLM should be skipped."""
+        self.call_llm = call_llm
+
+    def stop_event(self) -> None:
+        """Stop propagation to later handlers and pipeline stages."""
+        self._stopped = True
+
+    def is_stopped(self) -> bool:
+        """Return whether this fake event has been stopped."""
+        return self._stopped
+
+    def set_result(self, result: MessageEventResult) -> None:
+        """Store a result for pipeline-style tests."""
+        self._result = result
+
+    def get_result(self) -> MessageEventResult | None:
+        """Return the stored pipeline result."""
+        return self._result
+
+    def clear_result(self) -> None:
+        """Clear the stored pipeline result."""
+        self._result = None
+
+    def set_extra(self, key: str, value: object) -> None:
+        """Store one plugin-scoped event extra."""
+        self._extras[key] = value
+
+    def get_extra(self, key: str | None = None, default: object = None) -> object:
+        """Read one plugin-scoped event extra or the complete mapping."""
+        if key is None:
+            return self._extras
+        return self._extras.get(key, default)
 
 
 class EventMessageType(StrEnum):
@@ -123,6 +161,8 @@ class filter:
     @staticmethod
     def event_message_type(
         _message_type: EventMessageType,
+        *,
+        priority: int = 0,
     ) -> Callable[
         [Callable[Parameters, ReturnT]],
         Callable[Parameters, ReturnT],
@@ -132,6 +172,7 @@ class filter:
         def decorate(
             handler: Callable[Parameters, ReturnT],
         ) -> Callable[Parameters, ReturnT]:
+            _ = priority
             return handler
 
         return decorate

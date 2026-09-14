@@ -632,6 +632,23 @@ async def assert_llm_user_interaction() -> None:
     assert user_events[0].pig_id == before[0].pig_id
     assert user_events[0].description == "喂了一碗玉米糊"
 
+    listener_llm = ScriptedLlm()
+    plugin._llm = listener_llm
+    listener_event = AstrMessageEvent(
+        sender_id="owner-a",
+        platform_id="qq",
+        group_id="group-1",
+        message_str="给小猪再喂一碗玉米糊",
+        is_at_or_wake_command=True,
+    )
+    listener_results = tuple(
+        [result async for result in plugin.on_pigsty_user_message(listener_event)]
+    )
+    assert listener_results
+    assert listener_event.call_llm is True
+    assert listener_event.is_stopped() is True
+    assert listener_event.get_extra("pigsty_interaction_detected") is True
+
     class GuardLlm:
         def __init__(self) -> None:
             self.prompts: list[str] = []
