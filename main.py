@@ -196,7 +196,7 @@ class AstrBotPusher:
     PLUGIN_NAME,
     "when",
     "一个可以把群友圈养起来的养猪猪插件",
-    "v0.1.0",
+    "v1.0.3",
     "https://github.com/rorangeeee/astrbot_plugin_pigsty",
 )
 class PigstyPlugin(Star):

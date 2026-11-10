@@ -841,7 +841,7 @@ def test_metadata_declares_required_plugin_contract() -> None:
     assert {
         "name: astrbot_plugin_pigsty",
         'desc: "一个可以把群友圈养起来的养猪猪插件"',
-        "version: v1.0.2",
+        "version: v1.0.3",
         "author: when",
         "repo: https://github.com/rorangeeee/astrbot_plugin_pigsty",
         'astrbot_version: ">=4.16"',
