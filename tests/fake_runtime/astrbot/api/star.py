@@ -6,6 +6,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
 
+from astrbot.core.platform.message_session import MessageSession
+
 from .event import MessageChain
 from .provider import Provider
 
@@ -30,6 +32,7 @@ class Context:
 
     async def send_message(self, umo: str, chain: MessageChain) -> None:
         """Record the proactive message for smoke tests."""
+        _ = MessageSession.from_str(umo)
         self.sent_messages.append((umo, chain))
 
 

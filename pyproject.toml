@@ -92,6 +92,9 @@ unfixable = []
 "tests/test_plugin.py" = [
     "S603", # Fixed local interpreter command with no shell or external input.
 ]
+"tests/test_push_binding.py" = [
+    "S603", # Fixed local interpreter command and parametrized local scenarios.
+]
 "typings/astrbot/api/event.pyi" = [
     "A001", # The stub must expose AstrBot's `filter` binding.
     "N801", # The stub must preserve AstrBot's lowercase API name.

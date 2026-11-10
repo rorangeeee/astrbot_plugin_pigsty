@@ -74,6 +74,18 @@ def test_pig_allows_missing_member_association() -> None:
     assert pig.member_user_id is None
 
 
+def test_missing_push_origin_leaves_existing_pig_unbound() -> None:
+    raw = Pig(name="旧猪").model_dump_json()
+    pig = Pig.model_validate_json(raw.replace(',"push_origin":null', ""))
+    assert pig.push_origin is None
+
+
+@pytest.mark.parametrize("origin", ["", " ", "\t\n"])
+def test_pig_rejects_blank_push_origin(origin: str) -> None:
+    with pytest.raises(ValidationError):
+        _ = Pig(name="小猪", push_origin=origin)
+
+
 def test_pig_allows_long_member_nickname_without_extending_pig_name() -> None:
     # Given a linked member whose group nickname is longer than the pig limit
     nickname = "这是一个很长的群昵称" * 8

@@ -150,9 +150,7 @@ def _evolve_document_mutation(
     """Apply one evolution pass and report pig and event counts."""
     document = _prune_deceased(document)
     evolved = evolve_document(document, now, rng)
-    stats[0] += sum(
-        1 for pig in document.pigs if pig.health > 0 and is_due(pig, now)
-    )
+    stats[0] += sum(1 for pig in document.pigs if pig.health > 0 and is_due(pig, now))
     stats[1] += len(evolved.events) - len(document.events)
     return evolved
 
@@ -236,6 +234,8 @@ class PigstyService:
         identity: SessionIdentity,
         name: str | None = None,
         rng: RandomSource | None = None,
+        *,
+        push_origin: str | None = None,
     ) -> PigCreation:
         """Create and persist an independent pig with rolled initial stats."""
         pig_id = uuid4()
@@ -243,6 +243,7 @@ class PigstyService:
         pig = Pig(
             pig_id=pig_id,
             name=f"小猪-{pig_id.hex[:8]}" if name is None else name,
+            push_origin=push_origin,
             **roll.values(),
         )
 
@@ -262,6 +263,7 @@ class PigstyService:
         rng: RandomSource | None = None,
         *,
         member_name: str | None = None,
+        push_origin: str | None = None,
     ) -> PigCreation:
         """Create and persist a member-linked pig with rolled initial stats."""
         pig_id = uuid4()
@@ -271,6 +273,7 @@ class PigstyService:
             member_platform_id=member_platform_id,
             member_user_id=member_user_id,
             member_name=member_name,
+            push_origin=push_origin,
             name=f"小猪-{pig_id.hex[:8]}" if name is None else name,
             **roll.values(),
         )
@@ -288,6 +291,34 @@ class PigstyService:
 
         _ = await self._repository.update(identity, append_pig)
         return PigCreation(pig=pig, roll=roll)
+
+    async def bind_pigs(
+        self,
+        identity: SessionIdentity,
+        push_origin: str,
+        position: int | None = None,
+    ) -> tuple[Pig, ...]:
+        """Bind one display position, or all pigs, to a notification session."""
+        bound: list[Pig] = []
+
+        def bind(document: PigstyDocument) -> PigstyDocument:
+            document = _prune_deceased(document)
+            if position is not None and not 1 <= position <= len(document.pigs):
+                raise PigPositionNotFoundError(position)
+            pigs: list[Pig] = []
+            for index, pig in enumerate(document.pigs, start=1):
+                updated = pig
+                if position is None or index == position:
+                    updated = Pig.model_validate(
+                        pig.model_dump()
+                        | {"push_origin": push_origin, "updated_at": utc_now()}
+                    )
+                    bound.append(updated)
+                pigs.append(updated)
+            return document.model_copy(update={"pigs": tuple(pigs)})
+
+        _ = await self._repository.update(identity, bind)
+        return tuple(bound)
 
     async def rename_pig(
         self,
@@ -346,9 +377,7 @@ class PigstyService:
                 update={
                     "pigs": (*document.pigs[:index], *document.pigs[index + 1 :]),
                     "events": tuple(
-                        event
-                        for event in document.events
-                        if event.pig_id != pig.pig_id
+                        event for event in document.events if event.pig_id != pig.pig_id
                     ),
                 }
             )

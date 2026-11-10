@@ -16,6 +16,8 @@ import anyio
 from astrbot.api.event import AstrMessageEvent, MessageChain, MessageEventResult, filter
 from astrbot.api.message_components import At
 from astrbot.api.star import Star, StarTools, register
+from astrbot.core.platform.message_session import MessageSession
+from astrbot.core.platform.message_type import MessageType
 from pydantic import ValidationError
 from typing_extensions import override
 
@@ -61,13 +63,14 @@ if TYPE_CHECKING:
 PLUGIN_NAME: Final = "astrbot_plugin_pigsty"
 ADD_USAGE: Final = "pig add [@用户] [名字]"
 RENAME_USAGE: Final = "pig rename <序号> <新名字>"
+BIND_USAGE: Final = "pig bind <序号/all>"
 DIARY_USAGE: Final = "pig diary [序号]"
 LETGO_USAGE: Final = "pig letgo [序号/id/昵称]"
 STATUS_USAGE: Final = "pig status"
 SHOW_USAGE: Final = "pig show"
 UNKNOWN_COMMAND_USAGE: Final = (
     f"用法：\n{STATUS_USAGE}\n{ADD_USAGE}\n{RENAME_USAGE}\n"
-    f"{DIARY_USAGE}\n{LETGO_USAGE}\n{SHOW_USAGE}"
+    f"{BIND_USAGE}\n{DIARY_USAGE}\n{LETGO_USAGE}\n{SHOW_USAGE}"
 )
 LLM_PROVIDER_FIELD: Final = "llm_provider_id"
 ADMIN_IDS_FIELD: Final = "admin_ids"
@@ -124,7 +127,8 @@ class PigstyPusher(Protocol):
 class PendingPush:
     """One proactive message scheduled for a future moment."""
 
-    unified_origin: str
+    identity: SessionIdentity
+    pig_id: UUID
     text: str
     due_at: datetime
 
@@ -157,9 +161,7 @@ class AstrBotLlmClient:
                     provider_id=self._provider_id
                 )
             else:
-                provider = await self._context.get_using_provider_async(
-                    umo=origin
-                )
+                provider = await self._context.get_using_provider_async(umo=origin)
         except Exception:
             return ""
         if provider is None:
@@ -258,9 +260,7 @@ class PigstyPlugin(Star):
             values = tuple(raw_ids)
         else:
             values = ()
-        return frozenset(
-            str(value).strip() for value in values if str(value).strip()
-        )
+        return frozenset(str(value).strip() for value in values if str(value).strip())
 
     def _is_admin(self, event: AstrMessageEvent) -> bool:
         """Return whether an event sender is an AstrBot or configured admin."""
@@ -414,6 +414,8 @@ class PigstyPlugin(Star):
             description,
             moment,
         )
+        if outcome.pig.push_origin is None:
+            return
         pigs = await self.service.list_pigs(outcome.identity)
         position = next(
             (
@@ -431,7 +433,8 @@ class PigstyPlugin(Star):
         )
         self._schedule_push(
             PendingPush(
-                unified_origin=self._unified_origin_for(outcome.identity),
+                identity=outcome.identity,
+                pig_id=outcome.pig.pig_id,
                 text=text,
                 due_at=moment,
             )
@@ -486,20 +489,73 @@ class PigstyPlugin(Star):
         ]
         for push in due:
             try:
-                await self._pusher.push(push.unified_origin, push.text)
+                pigs = await self.service.list_pigs(push.identity)
+                pig = next((pig for pig in pigs if pig.pig_id == push.pig_id), None)
+                if pig is not None and pig.push_origin is not None:
+                    await self._pusher.push(pig.push_origin, push.text)
             except Exception:
                 self.logger.exception("failed to push an unexpected event message")
 
     @staticmethod
     def _unified_origin_for(identity: SessionIdentity) -> str:
         """Build AstrBot's unified_msg_origin string for a pigsty context."""
-        if identity.group_id is not None:
-            message_type = "group_message"
-            session_id = identity.group_id
+        return PigstyPlugin._session_origin(
+            identity.platform_id, identity.owner_user_id, identity.group_id
+        )
+
+    @staticmethod
+    def _session_origin(platform_id: str, user_id: str, group_id: str | None) -> str:
+        """Serialize a host session using its message-type enum."""
+        if group_id:
+            message_type = MessageType.GROUP_MESSAGE
+            session_id = group_id
         else:
-            message_type = "private_message"
-            session_id = identity.owner_user_id
-        return f"{identity.platform_id}:{message_type}:{session_id}"
+            message_type = MessageType.FRIEND_MESSAGE
+            session_id = user_id
+        return str(
+            MessageSession(
+                platform_name=platform_id,
+                message_type=message_type,
+                session_id=session_id,
+            )
+        )
+
+    @staticmethod
+    def _push_origin_for_event(event: AstrMessageEvent) -> str:
+        """Capture the command session independently of the storage scope."""
+        group_id = event.get_group_id()
+        return PigstyPlugin._session_origin(
+            event.get_platform_id(),
+            event.get_sender_id(),
+            group_id.strip() if group_id else None,
+        )
+
+    async def _handle_bind(self, event: AstrMessageEvent) -> str:
+        """Bind the owner's selected pigs to the current command session."""
+        selector = self._command_tail(event, "bind")
+        position: int | None = None
+        if selector.lower() != "all":
+            try:
+                position = int(selector)
+            except ValueError:
+                return f"用法：{BIND_USAGE}"
+            if position < 1:
+                return f"用法：{BIND_USAGE}"
+        try:
+            pigs = await self.service.bind_pigs(
+                self._identity_for_event(event),
+                self._push_origin_for_event(event),
+                position,
+            )
+        except PigPositionNotFoundError:
+            return f"找不到第 {position} 只小猪。"
+        if not pigs:
+            return "你的猪圈还是空的，使用 pig add 添加一只小猪吧。"
+        target = "当前群聊" if event.get_group_id() else "当前私聊"
+        subject = f"全部 {len(pigs)} 只小猪"
+        if position is not None:
+            subject = f"小猪{pigs[0].name}"
+        return f"已将{subject}的事件推送绑定到{target}。"
 
     @staticmethod
     def _render_stat_changes(changes: tuple[StatChange, ...]) -> str:
@@ -755,9 +811,7 @@ class PigstyPlugin(Star):
     ) -> str:
         """Render the LLM reply, falling back to a stat-change summary."""
         if len(plan.interactions) == 1:
-            changes = PigstyPlugin._render_stat_changes(
-                plan.interactions[0].changes
-            )
+            changes = PigstyPlugin._render_stat_changes(plan.interactions[0].changes)
         else:
             changes = "\n".join(
                 f"{pig.name}：\n{PigstyPlugin._render_stat_changes(interaction.changes)}"
@@ -839,9 +893,10 @@ class PigstyPlugin(Star):
             if pig.member_user_id is not None:
                 member_label = (pig.member_name or pig.member_user_id).lstrip("@")
                 member = f" @{member_label}"
+            binding = "（未绑定）" if pig.push_origin is None else ""
             lines.extend(
                 (
-                    f"{index}. {pig.name}{member}",
+                    f"{index}. {pig.name}{member}{binding}",
                     f"体重：{pig.weight_kg:.1f}kg",
                     f"健康：{pig.health}",
                     f"心情：{pig.mood}",
@@ -877,9 +932,7 @@ class PigstyPlugin(Star):
             "mood": "心情",
             "energy": "活力",
         }[key]
-        value_text = (
-            f"{float(value):.1f} kg" if key == "weight_kg" else str(int(value))
-        )
+        value_text = f"{float(value):.1f} kg" if key == "weight_kg" else str(int(value))
         return f"{marks}{label}：{value_text}{marks}"
 
     @classmethod
@@ -950,7 +1003,9 @@ class PigstyPlugin(Star):
             if target is None:
                 name = self._command_tail(event, normalized_action) or None
                 try:
-                    creation = await self.service.add_random(identity, name)
+                    creation = await self.service.add_random(
+                        identity, name, push_origin=self._push_origin_for_event(event)
+                    )
                 except ValidationError:
                     yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                     return
@@ -969,6 +1024,7 @@ class PigstyPlugin(Star):
                     target,
                     name,
                     member_name=member_name,
+                    push_origin=self._push_origin_for_event(event),
                 )
             except DuplicateMemberPigError as error:
                 yield event.plain_result(
@@ -983,6 +1039,9 @@ class PigstyPlugin(Star):
                 f"成功将@{target} {pig.name}添加进猪圈！\n"
                 f"{self._render_add_stats(creation.roll)}"
             )
+            return
+        if normalized_action == "bind":
+            yield event.plain_result(await self._handle_bind(event))
             return
         if normalized_action == "rename":
             tail = self._command_tail(event, normalized_action)
@@ -1015,9 +1074,7 @@ class PigstyPlugin(Star):
             except ValidationError:
                 yield event.plain_result("猪名字不能为空且不能超过 32 个字符。")
                 return
-            yield event.plain_result(
-                f"已将{old_name or pig.name}改名为{pig.name}。"
-            )
+            yield event.plain_result(f"已将{old_name or pig.name}改名为{pig.name}。")
             return
         if normalized_action == "diary":
             identity = self._identity_for_event(event)

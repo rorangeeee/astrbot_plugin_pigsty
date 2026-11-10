@@ -176,6 +176,7 @@ async def assert_macro_commands() -> None:
         "pig status\\n"
         "pig add [@用户] [名字]\\n"
         "pig rename <序号> <新名字>\\n"
+        "pig bind <序号/all>\\n"
         "pig diary [序号]\\n"
         "pig letgo [序号/id/昵称]\\n"
         "pig show"
@@ -620,7 +621,7 @@ async def assert_llm_user_interaction() -> None:
     assert f"Pigsty 判断到对小猪执行动作：猪圈={pigsty_log}" in capture_handler.messages
     actual_changes = plugin._render_stat_changes(
         plugin._actual_stat_changes(before[0], after[0])
-    ).replace("\n", "；")
+    ).replace("\\n", "；")
     assert (
         f"Pigsty 小猪数值变动：猪圈={pigsty_log}，小猪={after[0].name}，"
         f"变化：{actual_changes}"
@@ -721,7 +722,9 @@ async def assert_llm_user_interaction() -> None:
     assert death_reply == f"@owner-a，很抱歉，你的小猪{death_target.name}已死亡。"
     assert death_target not in await plugin.service.list_pigs(identity)
     death_show = await collect(death_event, "show")
-    assert death_show[0].text == "你的猪圈还是空的，使用 pig add 添加一只小猪吧。"
+    remaining = await plugin.service.list_pigs(identity)
+    assert death_show[0].text == plugin._render_pigsty(remaining)
+    assert all(pig.pig_id != death_target.pig_id for pig in remaining)
     linked_pig = Pig(
         member_platform_id="qq",
         member_user_id="linked-user",
@@ -838,7 +841,7 @@ def test_metadata_declares_required_plugin_contract() -> None:
     assert {
         "name: astrbot_plugin_pigsty",
         'desc: "一个可以把群友圈养起来的养猪猪插件"',
-        "version: v0.1.0",
+        "version: v1.0.2",
         "author: when",
         "repo: https://github.com/rorangeeee/astrbot_plugin_pigsty",
         'astrbot_version: ">=4.16"',
